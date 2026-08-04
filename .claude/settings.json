@@ -1,0 +1,64 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(awk *)",
+      "Bash(cat *)",
+      "Bash(cd *)",
+      "Bash(echo *)",
+      "Bash(exit *)",
+      "Bash(false)",
+      "Bash(find *)",
+      "Bash(gh auth status *)",
+      "Bash(gh repo view *)",
+      "Bash(gh pr view *)",
+      "Bash(git branch *)",
+      "Bash(git diff *)",
+      "Bash(git log *)",
+      "Bash(git ls-tree *)",
+      "Bash(git ls-remote *)",
+      "Bash(git merge-base *)",
+      "Bash(git rev-parse *)",
+      "Bash(git status *)",
+      "Bash(grep *)",
+      "Bash(head *)",
+      "Bash(ls *)",
+      "Bash(make *)",
+      "Bash(mkdir *)",
+      "Bash(npm audit *)",
+      "Bash(npm install *)",
+      "Bash(npm run *)",
+      "Bash(npx playwright test *)",
+      "Bash(npx tsp *)",
+      "Bash(npx vitest run *)",
+      "Bash(printf *)",
+      "Bash(pstree *)",
+      "Bash(rg *)",
+      "Bash(sed -n *)",
+      "Bash(sort *)",
+      "Bash(tail *)",
+      "Bash(true)",
+      "Bash(uv pip install *)",
+      "Bash(uv run pytest *)",
+      "Bash(uv run ruff *)",
+      "Bash(uv run --all-packages --all-extras ruff *)",
+      "Bash(uv sync *)",
+      "Bash(wc *)",
+      "Bash(xargs *)",
+      "WebSearch"
+    ],
+    "deny": [
+      "Bash(git checkout -- *)",
+      "Bash(git push --force *)",
+      "Bash(git reset --hard *)",
+      "Bash(rm -rf *)"
+    ]
+  },
+  "hooks": {
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+        ]
+      }
+    ]
+  }
+}

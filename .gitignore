@@ -1,0 +1,56 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+# NOTE: uv.lock is deliberately NOT ignored - commit it for reproducible installs.
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Linting
+.ruff_cache/
+
+# Cache
+.cache/
+*.log
+
+# Config (contains secrets)
+config/client_secrets.json
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Project-specific
+*.mp4
+*.avi
+*.mov
+*.mkv
+
+# Scrape output - regenerable, keep it out of history
+*.csv
+
+# Site profiles name real people - keep them out of the repo.
+# The shipped default is src/video_migrator/profiles/example.yaml
+config/*.yaml
+config/*.yml

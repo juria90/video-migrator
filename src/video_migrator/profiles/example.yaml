@@ -1,0 +1,59 @@
+# Example site profile — the shipped default, safe to publish.
+#
+# It is deliberately generic: a fictional host and placeholder names (홍길동 is
+# the Korean equivalent of "John Doe"). Copy it to describe a real site:
+#
+#   cp src/video_migrator/profiles/example.yaml config/<yoursite>.yaml
+#
+# Anything under config/ is gitignored, so a real profile — which names real
+# people — never enters the repository. The loader prefers ./config/<name>.yaml
+# over this file, and $VIDEO_MIGRATOR_CONFIG over both.
+
+site:
+  board_url: https://example.com/bbs/board.php
+
+# One entry per board. Order sets the CLI --board choices, and the first entry
+# is the default. creation_time is the time-of-day stamped into the media file;
+# omit it to use midnight. Keep it quoted — bare 10:30:00 is a YAML integer.
+boards:
+  - name: early_morning_prayer
+    genre: Sermon
+    creation_time: "05:30:00"
+  - name: sunday_sermon
+    genre: Sermon
+    creation_time: "10:30:00"
+  - name: wednesday_prayer
+    genre: Sermon
+  - name: friday_prayer
+    genre: Sermon
+    creation_time: "19:30:00"
+  - name: special_sermon
+    genre: Sermon
+  - name: charisma_praise
+    genre: Praise
+  - name: votive_song
+    genre: Praise
+  - name: choir_praise
+    genre: Praise
+
+normalize:
+  # Regex -> replacement, applied to every scraped title in the order listed.
+  # Python re.sub syntax: \1 is a capture group. Runs before title_spacing_words.
+  #
+  # Single-quote both sides. In double quotes YAML would eat the backslashes.
+  title_replacements:
+    '^\]\s+': ''                 # Remove a leading "] "
+    '^([^\[]*\])': '[\1'         # Add the missing "[" when only "]" is present
+    '\]제': '] 제'                # Put a space between "]" and 제
+    '제\s*(\d+)\s*장': '제\1장'    # Close up "제 3 장" -> "제3장"
+
+  # A scraped artist name must end with one of these, or validation warns.
+  valid_preacher_titles: [" 목사", " 선교사", " 장로", " 교수", " 총장", " M.D."]
+
+  # Words that get a space inserted before them when they appear mid-title.
+  title_spacing_words: ["강해"]
+
+  # Scraped name -> canonical name. Placeholders; put real ones in config/.
+  preacher_names:
+    홍길동: 홍길동 목사
+    김영희: 김영희 목사

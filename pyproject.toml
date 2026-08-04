@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=77.0"]  # >=77 for PEP 639 SPDX `license` / `license-files`
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "video-migrator"
+version = "0.1.0"
+description = "Migrate videos and their metadata between hosting platforms"
+license = "MIT"
+license-files = ["LICENSE"]
+# Must match the pin in .python-version.
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "beautifulsoup4",
+    "curl-cffi",
+    "google-api-python-client",
+    "oauth2client",
+    "pyyaml",
+    "requests",
+    "yt-dlp",
+]
+
+[project.optional-dependencies]
+# Browser-driven download strategies (video_migrator.sources.aninamu_playwright)
+browser = [
+    "playwright",
+]
+
+# Dev tooling is a dependency group (PEP 735), not an extra: it is never
+# shipped to consumers and `uv sync` installs it by default.
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-cov>=4.1.0",
+    "ruff",
+]
+
+[project.scripts]
+video-migrator-list = "video_migrator.cli:main"
+video-migrator-download = "video_migrator.sources.vimeo:main"
+video-migrator-upload = "video_migrator.sinks.youtube:main"
+
+[tool.setuptools]
+packages = [
+    "video_migrator",
+    "video_migrator.metadata",
+    "video_migrator.scrapers",
+    "video_migrator.sinks",
+    "video_migrator.sources",
+    "video_migrator.utils",
+]
+package-dir = {"" = "src"}
+
+# Site profiles are data, not code, but they ship inside the package so an
+# installed CLI works without a checkout. See video_migrator/config.py.
+[tool.setuptools.package-data]
+video_migrator = ["profiles/*.yaml"]
+
+[tool.pytest.ini_options]
+# Both trees are collected by default: unit tests under tests/, and the
+# doctests embedded in the package itself. Plain `pytest` therefore equals
+# what the Makefile calls `test-all`.
+testpaths = ["tests", "src/video_migrator"]
+addopts = [
+    "--doctest-modules",
+    "--strict-markers",
+    "--tb=short",
+]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",     # pycodestyle errors
+    "W",     # pycodestyle warnings
+    "F",     # pyflakes
+    "I",     # isort
+    "N",     # pep8-naming
+    "UP",    # pyupgrade
+    "B",     # flake8-bugbear
+    "C4",    # flake8-comprehensions
+    "SIM",   # flake8-simplify
+]
+ignore = [
+    "E501",  # Line too long (handled by formatter)
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["video_migrator"]
+known-third-party = ["requests", "bs4"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "auto"
