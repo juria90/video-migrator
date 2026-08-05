@@ -25,6 +25,19 @@ deliberate attention when writing or reviewing code.
 - Add type annotations to function signatures for both parameters and return types
 - Do not use `:type param_name:` or `:rtype:` in docstrings
 
+## Real-World Data
+
+This project scrapes a real site about real people. **Nothing committed may carry
+data identifying them** — names, the site's domain or branding, sermon titles,
+ids that resolve to a real recording, credentials. No tool checks this.
+
+Real values belong only in `config/*.yaml`, which is gitignored; never copy one
+out, including into a commit message. Everything tracked — profiles under
+`src/video_migrator/profiles/`, tests, doctests, README, comments — uses
+placeholders: `홍길동`/`김영희`, `John Doe`/`Jane Roe`, `예시교회`, `example.org`,
+`설교 제목`. Where a case depends on the *shape* of real data, keep the shape and
+replace the content.
+
 ## Code Formatting
 - Use `ruff` for code formatting and linting
 - Maximum line length is 120 characters

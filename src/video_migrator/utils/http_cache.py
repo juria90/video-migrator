@@ -13,6 +13,23 @@ from pathlib import Path
 import requests
 
 
+def decode_body(response: requests.Response) -> str:
+    """
+    Decode a response body, sniffing the charset when the server omits one.
+
+    ``requests`` falls back to ISO-8859-1 for a ``text/*`` response whose
+    Content-Type carries no charset, as HTTP/1.1 once required. A CMS that
+    declares UTF-8 only in a ``<meta>`` tag therefore decodes to mojibake, so
+    sniff the body instead of trusting that default.
+
+    :param response: The response to decode
+    :return: The body as text
+    """
+    if response.encoding and "charset" not in response.headers.get("Content-Type", "").lower():
+        response.encoding = response.apparent_encoding
+    return response.text
+
+
 class HTTPCache:
     """
     HTTP cache manager with support for Cache-Control and conditional requests.
@@ -109,13 +126,26 @@ class HTTPCache:
         # Check for must-revalidate or no-cache directives
         return "must-revalidate" in directives or "no-cache" in directives
 
-    def fetch_with_cache(self, url: str, cache_key: str, session: requests.Session | None = None) -> tuple[str, bool]:
+    def fetch_with_cache(
+        self,
+        url: str,
+        cache_key: str,
+        session: requests.Session | None = None,
+        data: dict[str, str] | None = None,
+    ) -> tuple[str, bool]:
         """
         Fetch content with caching support and revalidation.
 
+        Passing ``data`` turns the request into a POST. Conditional revalidation
+        is skipped in that case: ETag and Last-Modified describe a URL, and a
+        POST body is part of the request rather than of the URL, so a 304 would
+        say nothing about the response actually wanted.
+
         :param url: URL to fetch
-        :param cache_key: Unique cache key for this URL
+        :param cache_key: Unique cache key for this request; must distinguish
+            POST bodies too, since they are not part of the URL
         :param session: Optional requests Session to use
+        :param data: Form fields to POST. If None, the URL is fetched with GET
         :return: Tuple of (content, from_cache) where from_cache indicates if content was from cache
         :raises requests.RequestException: If the request fails
         """
@@ -124,11 +154,12 @@ class HTTPCache:
 
         cache_path = self.get_cache_path(cache_key)
         metadata = self.get_metadata(cache_path)
+        revalidatable = data is None
 
         # Check if we have a valid cached version
         if self.is_cache_valid(cache_path):
             # Check if revalidation is required
-            if self.should_revalidate(metadata):
+            if revalidatable and self.should_revalidate(metadata):
                 content = self.revalidate_cache(url, cache_path, metadata, session)
                 if content is not None:
                     return content, True
@@ -138,20 +169,20 @@ class HTTPCache:
                 return f.read(), True
 
         # If cache exists but expired, try revalidation
-        if cache_path.exists() and metadata:
+        if revalidatable and cache_path.exists() and metadata:
             content = self.revalidate_cache(url, cache_path, metadata, session)
             if content is not None:
                 return content, True
 
         # Fetch fresh content
         print(f"Fetching content: {url}")
-        response = session.get(url)
+        response = session.get(url) if data is None else session.post(url, data=data)
         response.raise_for_status()
 
         # Save response with metadata
         self.save_cache(cache_path, url, response)
 
-        return response.text, False
+        return decode_body(response), False
 
     def revalidate_cache(self, url: str, cache_path: Path, metadata: dict, session: requests.Session) -> str | None:
         """
@@ -215,7 +246,7 @@ class HTTPCache:
                 # Content has changed, save new version
                 print(f"Cache invalidated, fetched new content: {cache_path.name}")
                 self.save_cache(cache_path, url, response)
-                return response.text
+                return decode_body(response)
 
             response.raise_for_status()
         except requests.RequestException as e:
@@ -247,7 +278,7 @@ class HTTPCache:
 
         # Save to cache
         with open(cache_path, "w", encoding="utf-8") as f:
-            f.write(response.text)
+            f.write(decode_body(response))
 
         # Save cache metadata including validation headers
         metadata_path = self.get_metadata_path(cache_path)

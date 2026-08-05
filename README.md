@@ -9,7 +9,7 @@ The pipeline has four stages, and each one is pluggable:
 3. **Normalize and write** metadata into the media file with ffmpeg
 4. **Upload** to the destination platform (YouTube, ...)
 
-The shipped profile is a generic example; point it at a real site by adding a
+The shipped profiles are generic examples; point one at a real site by adding a
 profile under `config/`. Sources, sinks and scrapers are pluggable — new
 sources, sinks and scrapers are added by dropping a module into the matching
 package and registering it — see [Extending](#extending).
@@ -28,8 +28,9 @@ package and registering it — see [Extending](#extending).
 ## Features
 
 - Scrape video metadata from GnuBoard gallery boards (any site running it)
+- Scrape the VOD module of the 교회사랑넷 (church-love.net) church CMS
 - Support for multiple video platforms (Vimeo, YouTube, SoundCloud)
-- HTML page caching for faster subsequent runs
+- HTTP response caching for faster subsequent runs
 - Video metadata management using ffmpeg
 - Automatic language detection (Korean/English)
 - Metadata normalization and validation
@@ -144,8 +145,11 @@ All four exchange a single record type, `video_migrator.models.Video`.
 Installed as `video-migrator-list`, or run as `uv run python -m video_migrator.cli`.
 
 ```bash
-# Scrape early morning prayer videos (default board)
+# Scrape early morning prayer videos (default board of the default profile)
 video-migrator-list
+
+# Scrape a board on your own site profile under config/
+video-migrator-list -P mysite -b sunday_sermon
 
 # Scrape specific board with custom options
 video-migrator-list -b sunday_sermon -p 5 -o output.json -f json
@@ -161,6 +165,7 @@ video-migrator-list -b charisma_praise -l kor
 
 | Option | Description | Default |
 |--------|-------------|---------|
+| `-P, --profile` | Site profile to scrape (see [Configuration](#configuration)) | `example` |
 | `-b, --board` | Board name (see choices below) | `early_morning_prayer` |
 | `-l, --language` | ISO 639-2/B language code (e.g., 'kor', 'eng') | Auto-detect |
 | `-p, --pages` | Number of pages to scrape | Auto-detect |
@@ -171,7 +176,8 @@ video-migrator-list -b charisma_praise -l kor
 | `--cache-duration` | Cache duration in seconds | `3600` |
 | `--no-cache` | Disable caching | False |
 
-**Board Choices**:
+**Board Choices** (whatever the chosen profile declares; the shipped examples
+declare these):
 - `early_morning_prayer` - Early morning prayer sermons
 - `sunday_sermon` - Sunday worship sermons
 - `wednesday_prayer` - Wednesday prayer meetings
@@ -230,11 +236,11 @@ from video_migrator.config import load_profile
 
 video = Video(
     type="vimeo",
-    id="123456789",
-    url="https://vimeo.com/123456789",
-    embed_url="https://player.vimeo.com/video/123456789",
-    title="[사도행전 28장 강해] 바울의 로마 여정",
-    bible_verse="사도행전 28:11-31",
+    id="900000000001",
+    url="https://vimeo.com/900000000001",
+    embed_url="https://player.vimeo.com/video/900000000001",
+    title="[설교 시리즈 강해] 설교 제목",
+    bible_verse="요한복음 21:15-23",
     publish_date="2012-06-25",
     artist="홍길동 목사",
     genre="Sermon",
@@ -314,22 +320,37 @@ via `SINKS`, pointing at an upload callable.
 
 **Another site running software you already parse**: no code at all. Scraper
 modules are named after the *site software*, not the site — `gnuboard.py` parses
-any [GnuBoard](https://github.com/gnuboard/gnuboard5) gallery board. Add a
-profile and register it against the existing class:
+any [GnuBoard](https://github.com/gnuboard/gnuboard5) gallery board, and
+`churchlove.py` parses any site on the 교회사랑넷 CMS. A real profile lives under
+`config/` and so cannot be registered in the package; it names its software
+itself instead:
+
+```yaml
+# config/another_church.yaml
+site:
+  board_url: https://www.another-church.org/main/sub.html
+  scraper: churchlove        # the profile whose scraper parses this site
+```
+
+A profile shipped *inside* the package registers against the existing class
+instead:
 
 ```python
 # src/video_migrator/scrapers/__init__.py
 SCRAPERS = {
     "example": GnuBoardScraper,
+    "churchlove": ChurchLoveScraper,
     "another_church": GnuBoardScraper,  # + profiles/another_church.yaml
 }
 ```
 
 **A site running different software**: add
 `src/video_migrator/scrapers/<software>.py` with a scraper class that returns
-`Video` objects, then register it in `SCRAPERS` keyed by profile name.
+`Video` objects and exposes a `board_url(board, profile_name)` static method,
+then register it in `SCRAPERS` keyed by profile name.
 
-Look them up with `get_downloader()`, `get_uploader()` and `get_scraper()`.
+Look them up with `get_downloader()`, `get_uploader()` and `get_scraper()` —
+or, given a loaded profile, `scraper_for(profile)`, which honours `site.scraper`.
 
 ## Testing
 
@@ -420,10 +441,13 @@ All test files follow the `test_*.py` naming convention and use pytest fixtures 
 │       ├── config.py              # Site profile loading (see Configuration)
 │       ├── cli.py                 # Listing CLI (video-migrator-list)
 │       ├── profiles/              # Shipped site profiles
-│       │   └── example.yaml       # Shipped default; real ones live in config/
+│       │   ├── example.yaml       # Shipped default; real ones live in config/
+│       │   └── churchlove.yaml    # Example profile for the 교회사랑넷 CMS
 │       ├── scrapers/              # Stage 1: discover videos on a website
 │       │   ├── __init__.py        # SCRAPERS registry
-│       │   └── gnuboard.py        # GnuBoard gallery scraper (any GnuBoard site)
+│       │   ├── platforms.py       # Which platform a scraped video URL points at
+│       │   ├── gnuboard.py        # GnuBoard gallery scraper (any GnuBoard site)
+│       │   └── churchlove.py      # 교회사랑넷 (church-love.net) VOD scraper
 │       ├── sources/               # Stage 2: download from a source platform
 │       │   ├── __init__.py        # SOURCES registry
 │       │   ├── vimeo.py           # Vimeo downloader (yt-dlp)
@@ -445,7 +469,10 @@ All test files follow the `test_*.py` naming convention and use pytest fixtures 
 └── tests/                         # Test directory
     ├── __init__.py
     ├── test_board_creation_time.py    # Creation time tests
+    ├── test_churchlove.py             # 교회사랑넷 scraper and platform recognizer
+    ├── test_http_cache.py             # Cache decoding and POST support
     ├── test_multi_regex_replace.py    # Regex replacement tests
+    ├── test_normalize.py              # Title rewriting and preacher validation
     └── test_registries.py             # Registry lookup tests
 ```
 
@@ -462,20 +489,29 @@ Adding a board or a preacher alias is a config edit.
 |---|---|---|
 | 1 | `$VIDEO_MIGRATOR_CONFIG` | Point at any file; overrides everything |
 | 2 | `./config/<name>.yaml` | **Your real site profile — gitignored** |
-| 3 | `src/video_migrator/profiles/example.yaml` | The shipped, publishable default |
+| 3 | `src/video_migrator/profiles/<name>.yaml` | The shipped, publishable examples |
 
-The default lives inside the package so an installed CLI works without a
-checkout; it is included in the wheel via `[tool.setuptools.package-data]`.
+The examples live inside the package so an installed CLI works without a
+checkout; they are included in the wheel via `[tool.setuptools.package-data]`.
+Two ship today: `example.yaml` for a GnuBoard site and `churchlove.yaml` for one
+on the 교회사랑넷 CMS.
 
 **A real profile names real people** — preacher aliases are personal data — so
-`config/*.yaml` is gitignored and only the generic `example.yaml` is committed.
-To describe an actual site:
+**`config/` and `data/` are gitignored wholesale**, not by extension: profiles,
+credentials, scrape output and any working notes taken from the site all belong
+there, and the rule has to hold for the next file type someone reaches for. Only
+the generic examples under `src/video_migrator/profiles/` are committed. To
+describe an actual site, copy the example that matches its software:
 
 ```bash
-cp src/video_migrator/profiles/example.yaml config/mysite.yaml
+cp src/video_migrator/profiles/churchlove.yaml config/mysite.yaml
 $EDITOR config/mysite.yaml
-VIDEO_MIGRATOR_CONFIG=config/mysite.yaml video-migrator-list
+video-migrator-list --profile mysite --board sunday_sermon
 ```
+
+`--profile` selects a profile by name, resolved through the table above;
+`VIDEO_MIGRATOR_CONFIG=<path> video-migrator-list` still works for pointing at a
+file directly.
 
 ### Boards
 
@@ -494,6 +530,68 @@ boards:
 
 Keep `creation_time` quoted — bare `10:30:00` is an integer in YAML.
 
+Some CMSes address a board by an opaque code rather than by a name you choose.
+Give those boards a `page_code` alongside the name you want the CLI to use —
+find it in the URL the site's own menu links to. `weekday` is the day the
+service is held:
+
+```yaml
+boards:
+  - name: sunday_sermon    # 주일예배
+    page_code: 9
+    weekday: sunday
+    genre: Sermon
+    creation_time: "10:30:00"
+```
+
+### Publish dates that run late
+
+A site often stamps a recording when it was *posted*, not when it was recorded —
+a Sunday sermon uploaded that evening can land on the Monday. Declaring a board's
+`weekday` lets normalization pull such a date back onto the day of the service,
+and `year` moves with it (a Monday 1 January belongs to the year before).
+
+Corrections run **backwards only** — a recording is filed when it is posted, so
+its date lands on or after the service, never before. How far back to reach is a
+policy, since it trades a stricter invariant against the risk of inventing a
+date:
+
+```yaml
+normalize:
+  max_publish_date_drift: 6   # default 1
+```
+
+`1` corrects only the routine posted-the-next-day case and leaves anything
+further for `validate_videos` to report by name. `6` treats the weekday as an
+invariant and always corrects to the preceding occurrence. Either way, a move of
+more than a day is printed, so the unusual corrections stay visible rather than
+silently rewriting history.
+
+A correction of more than a day is a guess, and a guess is **refused where
+something contradicts it**: another row already holding that date *for the same
+service*, or a second guess competing for it. Those rows keep their scraped date
+and are reported. Without this a mis-typed year quietly becomes a
+plausible-looking duplicate, which is far harder to notice later than a date that
+still looks wrong.
+
+A single day yields several recordings, so a date alone does not identify a
+service — `service_parts` names the markers that tell them apart:
+
+```yaml
+normalize:
+  service_parts: ["1부", "2부", "3부", "영상"]
+```
+
+A title's markers are collected as a set, not matched in order, because a title
+can carry two: `1부 영상` is the video of the first service and is neither the
+first service nor another day's video. A second service therefore lands beside
+its first rather than being refused, while a row naming no service still
+conflicts with another such row. One-day corrections are never refused at all —
+a day's services drift together and are meant to land on the same date.
+
+Omit `weekday` for a board with no fixed day — a daily prayer meeting, or an
+occasional series — and its dates are never touched, whatever the drift setting.
+
 ### Normalization rules
 
 ```yaml
@@ -501,17 +599,72 @@ normalize:
   title_replacements:      # regex -> replacement, applied in order
     '^\]\s+': ''           # single-quote both sides, see below
     '\]제': '] 제'
-  valid_preacher_titles: [" 목사", " 선교사", " 장로"]
+  valid_preacher_titles: [" 목사", " 선교사", " 장로"]   # titles that follow a name
+  valid_preacher_prefixes: ["Rev.", "Pastor", "Dr."]     # titles that precede one
   title_spacing_words: ["강해"]
   preacher_names:          # scraped name -> canonical name
     홍길동목사: 홍길동 목사
     김영희: 김영희 목사
+    ".": ""                # the site's placeholder for "nobody recorded"
 ```
+
+A service part recorded against the *preacher* describes the service, not the
+person. `preacher_service_pattern` moves it into the title, where the rest of the
+board keeps it:
+
+```yaml
+normalize:
+  preacher_service_pattern: '[_\s]*([123]부|영상)(?:설교|예배)?\s*$'
+```
+
+Its one capture group is the part. `홍길동 선교사_2부설교` on *설교 제목 하나*
+becomes preacher `홍길동 선교사` and title `설교 제목 하나 (2부)` — the topic leads
+and the part qualifies it, so search terms are not buried behind a number. A title already
+naming the part keeps the one it has. This runs before `preacher_names`, so
+aliases only ever see a cleaned name — and it is what lets the date logic tell a
+1부 from a 2부 (see [Publish dates that run late](#publish-dates-that-run-late)).
+
+A preacher name passes validation if it carries a title from **either** list —
+Korean titles follow the name, English ones precede it. A trailing
+`(home church)` is ignored when looking, so `홍길동 목사 (예시교회 담임)` passes on
+its ` 목사`. Names the site records with the service part attached
+(`홍길동 목사 2부`) or with no space (`김영희목사`) are best fixed as
+`preacher_names` aliases.
+
+Every rewrite is reported. `fix_video_metadata()` **returns** its changes rather
+than printing them, so the caller chooses how loudly to say so; the CLI prints a
+count by default and each rewrite under `-v`:
+
+```
+Normalized 351 fields: 322 date, 18 preacher, 11 title
+```
+
+The counts are the point: a rule that quietly rewrote 800 titles is worth
+noticing even when every rewrite was correct, and a misfiring rule rewrites just
+as silently as a working one. Change indexes match the numbering
+`validate_videos` uses, so a warning and a rewrite can be lined up against the
+same row.
 
 `title_replacements` runs first, in declaration order, using Python `re.sub`
 syntax (`\1` for a capture group); `title_spacing_words` runs afterwards.
 **Single-quote both the pattern and the replacement** — YAML processes
 backslash escapes inside double quotes, so `"\]"` would not survive.
+
+### Duplicate records
+
+`validate_videos` also flags a video filed under more than one record:
+
+```
+Warning: Found 2 videos filed under more than one record:
+  https://vimeo.com/999999999999
+    456. (1부예배) 설교 제목
+    457. (1부예배) 설교 제목
+```
+
+It keys on the **video URL**, not on title and date. A two-service Sunday
+preaches one sermon twice and files two recordings under one title, so matching
+on title and date would flag those as duplicates when they are nothing of the
+kind. Two records pointing at the same recording is the only unambiguous signal.
 
 Profiles are loaded with a strict YAML loader that **rejects duplicate keys**.
 Plain YAML keeps the last one, so forgetting the `- ` on a new board would
@@ -521,7 +674,7 @@ instead.
 ### What stays in code
 
 Not everything site-shaped belongs in config. `PLATFORM_LABELS` in
-`scrapers/gnuboard.py` maps to parsers the module actually implements —
+`scrapers/platforms.py` maps to platforms the package can actually resolve —
 adding an entry would produce a label, not the ability to scrape that platform.
 Same for the retry and category tables in `sinks/youtube.py`.
 

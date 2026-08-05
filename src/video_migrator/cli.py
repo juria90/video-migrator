@@ -14,9 +14,9 @@ import sys
 from dataclasses import asdict
 
 from .config import DEFAULT_PROFILE, load_profile
-from .metadata.normalize import fix_video_metadata, validate_videos
+from .metadata.normalize import fix_video_metadata, report_changes, validate_videos
 from .models import Video
-from .scrapers.gnuboard import GnuBoardScraper, board_url
+from .scrapers import scraper_for
 
 
 def format_output(videos: list[Video], output_format: str, verbose: bool = False) -> str:
@@ -103,15 +103,38 @@ def _validate_language(value: str) -> str:
     raise argparse.ArgumentTypeError(f"Language must be empty or a 3-letter ISO 639-2/B code, got: {value}")
 
 
-def create_argument_parser() -> argparse.ArgumentParser:
+def create_profile_parser() -> argparse.ArgumentParser:
+    """
+    Create the parser for the one option that has to be read before the rest.
+
+    Which boards ``--board`` accepts depends on the profile, so ``--profile`` is
+    parsed on its own first and then folded into the full parser as a parent.
+
+    :return: Parser accepting only --profile, with help suppressed
+    """
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument(
+        "-P",
+        "--profile",
+        default=DEFAULT_PROFILE,
+        help=f"Site profile to scrape: a name under config/ or a shipped one (default: {DEFAULT_PROFILE})",
+    )
+    return parser
+
+
+def create_argument_parser(profile_name: str = DEFAULT_PROFILE) -> argparse.ArgumentParser:
     """
     Create and configure the argument parser for the CLI.
 
+    :param profile_name: Site profile whose boards ``--board`` should accept
     :return: Configured argument parser
     """
-    board_names = load_profile(DEFAULT_PROFILE).board_names
+    board_names = load_profile(profile_name).board_names
 
-    parser = argparse.ArgumentParser(description="Scrape video links and metadata from a webpage")
+    parser = argparse.ArgumentParser(
+        description="Scrape video links and metadata from a webpage",
+        parents=[create_profile_parser()],
+    )
     parser.add_argument(
         "-b",
         "--board",
@@ -169,21 +192,27 @@ def main() -> None:
 
     :raises SystemExit: Exits with code 1 if scraping fails
     """
-    parser = create_argument_parser()
-    args = parser.parse_args()
-
     try:
+        # --profile decides which boards --board accepts, so read it first. An
+        # unknown profile has to fail inside the try: it is reported here, not
+        # by argparse.
+        profile_args, _ = create_profile_parser().parse_known_args()
+        parser = create_argument_parser(profile_args.profile)
+        args = parser.parse_args()
+
+        profile = load_profile(args.profile)
+        scraper_class = scraper_for(profile)
+
         # Use board from arguments
-        board = args.board
-        url = board_url(board)
-        genre = load_profile(DEFAULT_PROFILE).board(board).genre
+        board = profile.board(args.board)
+        url = scraper_class.board_url(board.name, profile.name)
 
         # Set cache duration to 0 if caching is disabled
         cache_duration = 0 if args.no_cache else args.cache_duration
 
-        scraper = GnuBoardScraper(
+        scraper = scraper_class(
             url,
-            genre=genre,
+            genre=board.genre,
             language=args.language,
             cache_dir=args.cache_dir,
             cache_duration=cache_duration,
@@ -194,8 +223,8 @@ def main() -> None:
             print("No videos found on the page.", file=sys.stderr)
             sys.exit(0)
 
-        # Normalize video metadata
-        fix_video_metadata(videos)
+        # Normalize video metadata, reporting what it rewrote
+        report_changes(fix_video_metadata(videos, profile, board), args.verbose)
 
         # Format output
         output = format_output(videos, args.format, args.verbose)
@@ -207,7 +236,7 @@ def main() -> None:
             print(f"\nResults saved to: {args.output}")
 
             # Validate video data
-            validate_videos(videos)
+            validate_videos(videos, profile, board)
         else:
             print(output)
 

@@ -55,8 +55,12 @@ coverage:  ## Run tests with an HTML + terminal coverage report
 # --- Lint / format ----------------------------------------------------------
 
 .PHONY: lint
-lint:  ## Lint with ruff
+lint: no-real-data  ## Lint with ruff, and check no real-site data is committable
 	$(UV) run ruff check .
+
+.PHONY: no-real-data
+no-real-data:  ## Check committable files for data identifying the real site
+	$(UV) run python tools/check_no_real_data.py
 
 .PHONY: lint-fix
 lint-fix:  ## Lint with ruff and apply safe autofixes

@@ -1,46 +1,63 @@
-# Example site profile — the shipped default, safe to publish.
+# Example site profile for a church running the 교회사랑넷 (church-love.net) CMS.
 #
-# It is deliberately generic: a fictional host and placeholder names (홍길동 is
-# the Korean equivalent of "John Doe"). Copy it to describe a real site:
+# Same shape as example.yaml, with the two fields that CMS needs: it serves
+# every page from one script and addresses a board by an opaque page code, so
+# each board carries the code the site uses for it.
 #
-#   cp src/video_migrator/profiles/example.yaml config/<yoursite>.yaml
+# Deliberately generic: a fictional host and placeholder names (홍길동 is the
+# Korean equivalent of "John Doe"). Copy it to describe a real site:
+#
+#   cp src/video_migrator/profiles/churchlove.yaml config/<yoursite>.yaml
 #
 # Anything under config/ is gitignored, so a real profile — which names real
-# people — never enters the repository. The loader prefers ./config/<name>.yaml
-# over this file, and $VIDEO_MIGRATOR_CONFIG over both.
+# people — never enters the repository. A profile there cannot be registered in
+# scrapers/SCRAPERS, so it names its software below instead.
 
 site:
-  board_url: https://example.com/bbs/board.php
+  board_url: https://example.org/main/sub.html
+  # The profile whose scraper parses this site. Redundant here, since 'churchlove'
+  # is itself registered; a profile under config/ needs it.
+  scraper: churchlove
 
 # One entry per board. Order sets the CLI --board choices, and the first entry
 # is the default. weekday is the day the service is held; a publish date one day
 # later is treated as a late upload and pulled back onto it. Omit weekday for a
-# board with no fixed day. creation_time is the time-of-day stamped into the media file;
-# omit it to use midnight. Keep it quoted — bare 10:30:00 is a YAML integer.
+# board with no fixed day. page_code is how the site addresses the board; find it in the
+# URL the site's own menu links to. creation_time is the time-of-day stamped
+# into the media file; omit it to use midnight. Keep it quoted — bare 10:30:00
+# is a YAML integer.
 boards:
   - name: early_morning_prayer
+    page_code: 10
     genre: Sermon
     creation_time: "05:30:00"
   - name: sunday_sermon
+    page_code: 9
     weekday: sunday
     genre: Sermon
     creation_time: "10:30:00"
   - name: wednesday_prayer
+    page_code: 11
     weekday: wednesday
     genre: Sermon
   - name: friday_prayer
+    page_code: 12
     weekday: friday
     genre: Sermon
     creation_time: "19:30:00"
   - name: special_sermon
+    page_code: 13
     genre: Sermon
   - name: charisma_praise
+    page_code: 15
     weekday: sunday
     genre: Praise
   - name: votive_song
+    page_code: 16
     weekday: sunday
     genre: Praise
   - name: choir_praise
+    page_code: 17
     weekday: sunday
     genre: Praise
 

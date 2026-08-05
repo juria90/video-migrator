@@ -24,29 +24,7 @@ from bs4 import BeautifulSoup
 from ..config import DEFAULT_PROFILE, load_profile
 from ..models import Video
 from ..utils.http_cache import HTTPCache
-
-# Display names for the platforms a scraped video can live on. Unlike the board
-# list this is not configuration: each label corresponds to a parser this module
-# implements, so adding one here would produce a label, not a capability.
-PLATFORM_LABELS = {
-    "vimeo": "Vimeo",
-    "youtube": "YouTube",
-    "soundcloud": "SoundCloud",
-}
-
-
-def board_url(board: str, profile_name: str = DEFAULT_PROFILE) -> str:
-    """
-    Build the listing URL for a board on the profile's site.
-
-    :param board: Board table name, one of ``load_profile(profile_name).board_names``
-    :param profile_name: Site profile supplying the base URL
-    :return: Fully qualified board listing URL
-
-    >>> board_url("sunday_sermon")
-    'https://example.com/bbs/board.php?bo_table=sunday_sermon'
-    """
-    return f"{load_profile(profile_name).board_url}?bo_table={board}"
+from .platforms import summarize_types
 
 
 class GnuBoardScraper:
@@ -56,6 +34,17 @@ class GnuBoardScraper:
     This class fetches a webpage and extracts video information including
     titles, URLs, thumbnails, and other metadata.
     """
+
+    @staticmethod
+    def board_url(board: str, profile_name: str = DEFAULT_PROFILE) -> str:
+        """
+        Build the listing URL for a board on the profile's site.
+
+        :param board: Board table name, one of ``load_profile(profile_name).board_names``
+        :param profile_name: Site profile supplying the base URL
+        :return: Fully qualified board listing URL
+        """
+        return f"{load_profile(profile_name).board_url}?bo_table={board}"
 
     def __init__(self, url: str, genre: str, language: str = "", cache_dir: str = ".cache", cache_duration: int = 3600):
         """
@@ -348,7 +337,7 @@ class GnuBoardScraper:
 
             # Process the first page we already fetched
             videos_from_page = self.extract_videos(html)
-            print(f"Page 1/{max_pages}: Found {len(videos_from_page)} videos ({_summarize_types(videos_from_page)})")
+            print(f"Page 1/{max_pages}: Found {len(videos_from_page)} videos ({summarize_types(videos_from_page)})")
             all_videos.extend(videos_from_page)
 
             # Start from page 2
@@ -384,7 +373,7 @@ class GnuBoardScraper:
                 continue
 
             print(
-                f"Page {page_num}/{max_pages}: Found {len(videos_from_page)} videos ({_summarize_types(videos_from_page)})"
+                f"Page {page_num}/{max_pages}: Found {len(videos_from_page)} videos ({summarize_types(videos_from_page)})"
             )
             all_videos.extend(videos_from_page)
 
@@ -392,16 +381,15 @@ class GnuBoardScraper:
         return all_videos
 
 
-def _summarize_types(videos: list[Video]) -> str:
+def board_url(board: str, profile_name: str = DEFAULT_PROFILE) -> str:
     """
-    Summarize how many videos of each platform type were found.
+    Build the listing URL for a board on the profile's site.
 
-    :param videos: Videos found on a single page
-    :return: Comma-separated summary such as "12 Vimeo, 3 YouTube"
+    :param board: Board table name, one of ``load_profile(profile_name).board_names``
+    :param profile_name: Site profile supplying the base URL
+    :return: Fully qualified board listing URL
+
+    >>> board_url("sunday_sermon")
+    'https://example.com/bbs/board.php?bo_table=sunday_sermon'
     """
-    counts = []
-    for video_type, label in PLATFORM_LABELS.items():
-        count = sum(1 for v in videos if v.type == video_type)
-        if count > 0:
-            counts.append(f"{count} {label}")
-    return ", ".join(counts)
+    return GnuBoardScraper.board_url(board, profile_name)

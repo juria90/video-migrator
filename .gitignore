@@ -50,7 +50,10 @@ Thumbs.db
 # Scrape output - regenerable, keep it out of history
 *.csv
 
-# Site profiles name real people - keep them out of the repo.
-# The shipped default is src/video_migrator/profiles/example.yaml
-config/*.yaml
-config/*.yml
+# config/ and data/ describe the real site and the real people on it: profiles,
+# credentials, scrape output, and working notes taken from it. Ignore both
+# wholesale rather than by extension — the rule has to hold for the next file
+# type someone reaches for, not just the ones used so far. The publishable
+# example profiles live in src/video_migrator/profiles/ instead.
+config/*
+data/*

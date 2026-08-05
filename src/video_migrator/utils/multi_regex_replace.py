@@ -37,8 +37,7 @@ def multi_replace(text: str, replacements: dict[str, str | Callable[[re.Match], 
     'Smith, John Jane, and Doe'
     """
     # Combine all patterns into one with named groups
-    combined_pattern = '|'.join(f'(?P<g{i}>{pattern})'
-                                 for i, pattern in enumerate(replacements.keys()))
+    combined_pattern = "|".join(f"(?P<g{i}>{pattern})" for i, pattern in enumerate(replacements.keys()))
 
     # Create a compiled regex
     regex: Pattern[str] = re.compile(combined_pattern)
@@ -47,7 +46,7 @@ def multi_replace(text: str, replacements: dict[str, str | Callable[[re.Match], 
     def replace_func(match: re.Match) -> str:
         # Find which group matched
         for i, (pattern, replacement) in enumerate(replacements.items()):
-            group_name = f'g{i}'
+            group_name = f"g{i}"
             if match.group(group_name) is not None:
                 # If replacement is a function, call it with the match
                 if callable(replacement):

@@ -2,9 +2,10 @@
 """
 Site profiles: the per-site data the pipeline needs, kept out of the code.
 
-A profile describes one source website — which boards it has, and the vocabulary
-used to normalize the metadata scraped from it. Adding a board or a preacher
-alias is a YAML edit, not a code change.
+A profile describes one source website — which software it runs, which boards it
+has, and the vocabulary used to normalize the metadata scraped from it. Adding a
+board or a preacher alias is a YAML edit, not a code change; so is pointing a new
+site at a scraper this package already has, via ``site.scraper``.
 
 ``load_profile()`` resolves a profile by name, first hit wins:
 
@@ -36,6 +37,9 @@ DEFAULT_CREATION_TIME = "00:00:00"
 CONFIG_ENV_VAR = "VIDEO_MIGRATOR_CONFIG"
 
 DEFAULT_PROFILE = "example"
+
+#: Weekday names a board may declare, in ``datetime.date.weekday()`` order.
+WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
 
 class _StrictLoader(yaml.SafeLoader):
@@ -76,6 +80,27 @@ class Board:
     name: str
     genre: str = ""
     creation_time: str = DEFAULT_CREATION_TIME
+    #: How the site addresses this board, for CMSes that key boards by an opaque
+    #: code rather than by the name used here. Empty when the name is enough.
+    page_code: str = ""
+    #: Weekday this board's service is held on, lowercase. Empty for a board with
+    #: no fixed day, such as a daily prayer meeting or an occasional series.
+    weekday: str = ""
+
+    @property
+    def weekday_index(self) -> int | None:
+        """
+        The board's meeting day as a :meth:`datetime.date.weekday` ordinal.
+
+        :return: 0 for Monday through 6 for Sunday, or None if the board keeps
+            no fixed day
+
+        >>> load_profile("churchlove").board("sunday_sermon").weekday_index
+        6
+        >>> load_profile("churchlove").board("early_morning_prayer").weekday_index is None
+        True
+        """
+        return WEEKDAYS.index(self.weekday) if self.weekday else None
 
 
 @dataclass(frozen=True)
@@ -87,9 +112,30 @@ class Profile:
     boards: tuple[Board, ...]
     #: Regex -> replacement, applied to titles in declaration order.
     title_replacements: dict[str, str]
+    #: Regex -> replacement, applied to bible verses in declaration order, before
+    #: the generic tidying every site needs.
+    bible_verse_replacements: dict[str, str]
     preacher_names: dict[str, str]
     valid_preacher_titles: tuple[str, ...]
     title_spacing_words: tuple[str, ...]
+    #: Name of the profile whose scraper parses this site, for a site running
+    #: software some other profile already describes. Empty means this profile's
+    #: own name is registered in :data:`~video_migrator.scrapers.SCRAPERS`.
+    scraper: str = ""
+    #: Titles that come *before* the name instead of after it, as English ones
+    #: do. A name qualifies on either this list or :attr:`valid_preacher_titles`.
+    valid_preacher_prefixes: tuple[str, ...] = ()
+    #: How many days late a publish date may be and still be pulled back onto its
+    #: board's weekday. 1 corrects only the routine posted-the-next-day case; 6
+    #: treats the weekday as an invariant and always corrects to it.
+    max_publish_date_drift: int = 1
+    #: Markers naming which service of the day a title belongs to, so that the
+    #: several recordings a single day produces can be told apart.
+    service_parts: tuple[str, ...] = ()
+    #: Regex matching a service part recorded at the end of a preacher name, with
+    #: the part itself as its one capture group. Such a part describes the
+    #: service rather than the person, so it is moved into the title.
+    preacher_service_pattern: str = ""
 
     @property
     def board_names(self) -> tuple[str, ...]:
@@ -140,25 +186,44 @@ def _parse(name: str, data: dict) -> Profile:
         if entry["name"] in seen:
             raise ValueError(f"profile {name!r}: duplicate board {entry['name']!r}")
         seen.add(entry["name"])
+        weekday = str(entry.get("weekday", "")).lower()
+        if weekday and weekday not in WEEKDAYS:
+            raise ValueError(
+                f"profile {name!r}: board {entry['name']!r} declares weekday {weekday!r}; "
+                f"expected one of {', '.join(WEEKDAYS)}"
+            )
         boards.append(
             Board(
                 name=entry["name"],
                 genre=entry.get("genre", ""),
                 creation_time=entry.get("creation_time", DEFAULT_CREATION_TIME),
+                # A page code is written unquoted in YAML, so it arrives as an int.
+                page_code=str(entry.get("page_code", "")),
+                weekday=weekday,
             )
         )
     if not boards:
         raise ValueError(f"profile {name!r} declares no boards")
 
+    site = data.get("site") or {}
     normalize = data.get("normalize") or {}
+    drift = int(normalize.get("max_publish_date_drift", 1))
+    if not 0 <= drift <= 6:
+        raise ValueError(f"profile {name!r}: max_publish_date_drift must be 0-6, got {drift}")
     return Profile(
         name=name,
-        board_url=(data.get("site") or {}).get("board_url", ""),
+        board_url=site.get("board_url", ""),
         boards=tuple(boards),
         title_replacements=dict(normalize.get("title_replacements") or {}),
+        bible_verse_replacements=dict(normalize.get("bible_verse_replacements") or {}),
         preacher_names=dict(normalize.get("preacher_names") or {}),
         valid_preacher_titles=tuple(normalize.get("valid_preacher_titles") or ()),
         title_spacing_words=tuple(normalize.get("title_spacing_words") or ()),
+        scraper=site.get("scraper", ""),
+        valid_preacher_prefixes=tuple(normalize.get("valid_preacher_prefixes") or ()),
+        max_publish_date_drift=drift,
+        service_parts=tuple(normalize.get("service_parts") or ()),
+        preacher_service_pattern=normalize.get("preacher_service_pattern", ""),
     )
 
 

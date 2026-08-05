@@ -20,22 +20,37 @@ def create_test_video(output_path: Path) -> None:
     """
     cmd = [
         "ffmpeg",
-        "-f", "lavfi",
-        "-i", "color=c=black:s=320x240:d=0.1",  # Black video, 0.1 second
-        "-f", "lavfi",
-        "-i", "anullsrc=r=44100:cl=stereo:d=0.1",  # Silent audio, 0.1 second
-        "-c:v", "libx264",
-        "-c:a", "aac",
-        "-t", "0.1",
+        "-f",
+        "lavfi",
+        "-i",
+        "color=c=black:s=320x240:d=0.1",  # Black video, 0.1 second
+        "-f",
+        "lavfi",
+        "-i",
+        "anullsrc=r=44100:cl=stereo:d=0.1",  # Silent audio, 0.1 second
+        "-c:v",
+        "libx264",
+        "-c:a",
+        "aac",
+        "-t",
+        "0.1",
         # Add default metadata that should be overwritten
-        "-metadata", "title=Original Title",
-        "-metadata", "artist=Original Artist",
-        "-metadata", "genre=Original Genre",
-        "-metadata", "date=1999-01-01",
-        "-metadata", "year=1999",
-        "-metadata", "creation_time=1999-01-01T00:00:00.000000Z",
-        "-metadata", "comment=Original Comment",
-        "-metadata:s:", "language=eng",
+        "-metadata",
+        "title=Original Title",
+        "-metadata",
+        "artist=Original Artist",
+        "-metadata",
+        "genre=Original Genre",
+        "-metadata",
+        "date=1999-01-01",
+        "-metadata",
+        "year=1999",
+        "-metadata",
+        "creation_time=1999-01-01T00:00:00.000000Z",
+        "-metadata",
+        "comment=Original Comment",
+        "-metadata:s:",
+        "language=eng",
         "-y",  # Overwrite output file
         str(output_path),
     ]
@@ -99,9 +114,9 @@ def test_creation_time_for_board(test_video_file, tmp_path, board, expected_time
 
     video = Video(
         type="vimeo",
-        id="123456789",
-        url="https://vimeo.com/123456789",
-        embed_url="https://player.vimeo.com/video/123456789",
+        id="900000000001",
+        url="https://vimeo.com/900000000001",
+        embed_url="https://player.vimeo.com/video/900000000001",
         title=f"Test video for {board}",
         bible_verse="Test verse" if "prayer" in board or "sermon" in board else "",
         publish_date=publish_date,
@@ -146,8 +161,7 @@ def test_creation_time_for_board(test_video_file, tmp_path, board, expected_time
     expected_creation_time = f"{publish_date}T{expected_time}.000000Z"
 
     assert creation_time == expected_creation_time, (
-        f"Board '{board}': Expected creation_time '{expected_creation_time}', "
-        f"but got '{creation_time}'"
+        f"Board '{board}': Expected creation_time '{expected_creation_time}', but got '{creation_time}'"
     )
 
 

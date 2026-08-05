@@ -131,9 +131,7 @@ def main():
             print("  • Expired or temporarily unavailable")
             print("  • Using a streaming protocol that needs special handling")
             print("\nSuggested alternatives:")
-            print(
-                "  1. Use a browser extension like 'Video DownloadHelper' or 'Stream Recorder'"
-            )
+            print("  1. Use a browser extension like 'Video DownloadHelper' or 'Stream Recorder'")
             print("  2. Open the page in a browser and use browser dev tools")
             print(f"  3. Video URL found: {video_url}")
             print("=" * 70)

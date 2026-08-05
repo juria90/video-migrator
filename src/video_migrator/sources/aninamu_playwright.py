@@ -77,7 +77,7 @@ def download_aninamu_video(page_url: str, output_path: str) -> None:
             print(f"Found {iframes.count()} iframe(s)")
             for i in range(iframes.count()):
                 iframe_src = iframes.nth(i).get_attribute("src")
-                print(f"  Iframe {i+1} src: {iframe_src}")
+                print(f"  Iframe {i + 1} src: {iframe_src}")
 
         # Check for video elements
         videos = new_page.locator("video")
@@ -86,14 +86,14 @@ def download_aninamu_video(page_url: str, output_path: str) -> None:
             for i in range(videos.count()):
                 video = videos.nth(i)
                 src = video.get_attribute("src")
-                print(f"  Video {i+1} src: {src}")
+                print(f"  Video {i + 1} src: {src}")
 
                 # Check for source elements within video
                 sources = video.locator("source")
                 for j in range(sources.count()):
                     source_src = sources.nth(j).get_attribute("src")
                     source_type = sources.nth(j).get_attribute("type")
-                    print(f"    Source {j+1}: {source_src} (type: {source_type})")
+                    print(f"    Source {j + 1}: {source_src} (type: {source_type})")
 
         # Get page HTML to analyze
         html_content = new_page.content()
