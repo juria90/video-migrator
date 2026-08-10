@@ -54,13 +54,17 @@ def write_ledger(path: pathlib.Path, rows: list[dict[str, str]], columns: list[s
     """
     Write a ledger to disk.
 
+    Lines end with ``\\n`` on every platform. Left to translate, a ledger written
+    on Windows would come back with every one of its rows changed and none of
+    its values — a diff that hides real work rather than showing it.
+
     :param path: The TSV to write
     :param rows: The rows to write, in the order they should appear
     :param columns: The columns to write, in order; missing values are left blank
     :return: None
     """
     lines = ["\t".join(columns)] + ["\t".join((row.get(c) or "") for c in columns) for row in rows]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
 
 def is_scan_row(row: dict[str, str]) -> bool:

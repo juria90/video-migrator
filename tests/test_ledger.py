@@ -265,6 +265,22 @@ def test_a_ledger_survives_the_round_trip(tmp_path, columns):
     assert read_ledger(path) == [{c: original[0].get(c, "") for c in columns}]
 
 
+def test_a_ledger_is_written_with_lf_on_every_platform(tmp_path):
+    """
+    Line endings do not follow the platform the ledger happens to be written on.
+
+    Every reader accepts either, so the difference shows only in a diff — where
+    a ledger written on Windows comes back with all of its rows changed and none
+    of its values, hiding the work it contains instead of showing it.
+
+    :param tmp_path: Directory to write the ledger into
+    """
+    path = pathlib.Path(tmp_path) / "ledger.tsv"
+    write_ledger(path, [row(num="1", old="설교 제목", new="설교 제목 (1부)")], ["num", "old", "new"])
+
+    assert b"\r\n" not in path.read_bytes()
+
+
 def test_reading_a_ledger_that_is_not_there_yet(tmp_path):
     """
     The first run has nothing to read and must not fail.
