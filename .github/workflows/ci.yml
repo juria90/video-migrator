@@ -1,0 +1,51 @@
+# Continuous integration.
+#
+# Every step is a Makefile target, so what CI runs and what a developer runs
+# before pushing cannot drift apart. Adding a check means editing the Makefile,
+# and CI picks it up.
+#
+# The install is deliberately the plain dev sync, without the [browser] extra:
+# it is the environment most contributors will have, and the one that catches a
+# module importing an optional dependency at import time. conftest.py skips
+# collecting those modules when the extra is absent.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# A newer push to the same branch makes an in-flight run obsolete.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: lint and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Install Python and dependencies
+        run: make install
+
+      # Ruff, plus the check that nothing identifying the real site can be
+      # committed. That one reads its site-specific terms from sites/*/, which a
+      # clone does not have, so here it enforces the Korean allowlist and the
+      # platform-id rules only. Those are the parts that caught every past leak.
+      - name: Lint
+        run: make lint
+
+      - name: Test
+        run: make test-all
