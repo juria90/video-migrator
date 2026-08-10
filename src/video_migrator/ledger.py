@@ -131,7 +131,14 @@ def merge(
     for num, name, old, new, reason in found:
         key = (num, name)
         if key in pending and pending[key]["new"] == new:
-            continue                      # already queued, nothing new to say
+            # The proposal stands, but the record may have moved under it — an
+            # earlier round of the same rule, or a hand edit. Leaving ``old`` as
+            # it was would make the row diverge from the site for good, since a
+            # value matching neither ``old`` nor ``new`` is never written.
+            if pending[key]["old"] != old:
+                pending[key]["old"] = old
+                tally["old value refreshed"] += 1
+            continue                      # already queued, nothing else to say
         if any(r["num"] == num and r["field"] == name and r["new"] == new and r.get("updated_at")
                for r in ledger):
             continue                      # applied before and has drifted back; a fresh row would churn

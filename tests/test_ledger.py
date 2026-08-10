@@ -103,6 +103,27 @@ def test_a_hand_recovered_answer_survives_a_scan():
     assert tally["revised"] == 0
 
 
+def test_an_unchanged_proposal_still_refreshes_what_the_site_holds():
+    """
+    A row whose suggestion has not changed still has to track the record.
+
+    The site moves under a standing proposal all the time: an earlier round of
+    the same rule half-fixed the value, or someone edited it by hand. Skipping
+    the row because there is "nothing new to say" leaves ``old`` describing a
+    value the record no longer holds — and a record matching neither ``old`` nor
+    ``new`` is refused as diverged, for good. This is the bug that made two rows
+    unappliable through three rounds of the loop.
+    """
+    ledger = [row(num="1", field="verse", old="마가복음11;17~18", new="마가복음 11:17-18")]
+    found = [finding(num="1", field="verse", old="마가복음 11:17~18", new="마가복음 11:17-18")]
+    merged, tally = merge(ledger, {"1": {"subject": "", "word": "마가복음 11:17~18", "preacher": ""}},
+                          found, STAMP, FIELD_TAG)
+
+    assert len(merged) == 1, "the proposal stands, so no second row"
+    assert merged[0]["old"] == "마가복음 11:17~18", "but it must describe the record as it is now"
+    assert tally["old value refreshed"] == 1
+
+
 def test_a_scan_may_revise_its_own_row():
     """A row the scan raised is the scan's to sharpen."""
     ledger = [row(num="1", new="(look it up)")]

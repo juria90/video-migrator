@@ -122,6 +122,22 @@ ALLOWED_HANGUL = {
     # is the case the rule closes back up.
     "요한",
     "복음",
+    "사무엘",
+    "상",
+    # The words a chapter and verse are spelled out in — "2장 1절에서 10절" — as
+    # the runs they leave once the digits between them are taken out.
+    "절",
+    "절에서",
+    "절부터",
+    "절로",
+    "장에서",
+    "장편",
+    "에서",
+    "부터",
+    "로",
+    "까지",
+    # A book named by its abbreviation, which is still scripture and still nobody.
+    "요",
     # A name equidistant from two real books, which the rule must refuse to guess.
     "사무엘장",
     # Two edits from a real book, which is beyond what the rule will correct.

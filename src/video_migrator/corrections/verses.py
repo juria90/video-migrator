@@ -37,6 +37,46 @@ CHAPTER = re.compile(r"\d+\s*[:：]\s*\d+|\d+\s*(?:편|장)")
 #: digits: a semicolon *is* how two separate passages are joined.
 MISTYPED_COLON = re.compile(r"(\d);(\d)")
 
+#: Brackets that wrap a reference, and the character each is closed with.
+BRACKET_PAIRS = {"(": ")", "[": "]", "{": "}", "<": ">", "〈": "〉", "《": "》", "「": "」"}
+
+#: Brackets round the book name alone, leaving the chapter outside them —
+#: ``(John) 12:12-16``. The brackets say nothing the reference does not, and the
+#: board's style has none, so the name comes out of them and stays put.
+BRACKETED_BOOK = re.compile(r"^[(\[<]([^)\]>]+)[)\]>]")
+
+#: Wrappers written the same at both ends, so a pair cannot be told from a
+#: stray one by shape alone — only by appearing at both ends at once.
+SYMMETRIC_WRAPPERS = "-–—\"'"
+
+#: A tilde standing in for the hyphen a range is written with here. Between
+#: digits only, for the same reason :data:`MISTYPED_COLON` is.
+TILDE_RANGE = re.compile(r"(\d)\s*[~∼]\s*(\d)")
+
+#: How a range is joined when it is written out in words.
+SPELLED_RANGE = r"에서|부터|로|~|-|–|—"
+
+#: A number standing for a verse: it says ``절``, or it says nothing and is not
+#: a chapter. Without the second half, ``3장 1장에서 10장`` — a record that types
+#: 장 where it means 절 — reads as verse 1 of chapter 3 and half-converts to
+#: ``3:1장에서 10장``. Left whole it is merely wrong, which a reader can see.
+VERSE_NUMBER = r"(\d+)\s*(?:절|(?![\s]*[장편]))"
+
+#: A reference written out in words — ``2장 1절에서 10절``, ``2장 1-10절`` —
+#: rather than as ``2:1-10``. Either ``절`` may be left implied; the range is
+#: optional too, and so is a second chapter inside it, which is what tells
+#: ``1장 26절에서 2장 3절`` from ``1장 26절에서 30절``.
+SPELLED_REFERENCE = re.compile(
+    rf"(\d+)\s*장\s*{VERSE_NUMBER}"
+    rf"(?:\s*(?:{SPELLED_RANGE})\s*(?:(\d+)\s*장\s*)?{VERSE_NUMBER}(?:\s*까지)?)?"
+)
+
+#: A verse named on its own, after a chapter has already been given — the second
+#: half of ``23장 9절, 29절``. Only read where the value already cites a chapter
+#: in figures, so ``절`` is never stripped from a reference written entirely in
+#: words and left half-converted.
+TRAILING_VERSE = re.compile(r"(\d)\s*절")
+
 
 def one_edit_apart(spelled: str, book: str) -> bool:
     """
@@ -78,6 +118,61 @@ def cites_chapter(word: str) -> bool:
     return bool(CHAPTER.search(word))
 
 
+def unwrap(word: str) -> str:
+    """
+    Take punctuation off a reference that is wrapped in it.
+
+    A bracket is only a wrapper where it has no partner to belong to. ``(John)``
+    names a book, and taking its opening bracket off because the value happens
+    not to end in one leaves a reference that reads as damage — so a bracket
+    goes only as half of a matched pair, or when nothing in the value could have
+    matched it.
+
+    :param word: The reference as the site stores it
+    :return: The same reference with any wrapping punctuation removed
+
+    >>> unwrap("<요한복음 6:15-21>")
+    '요한복음 6:15-21'
+    >>> unwrap("(John) 12:12-16")
+    '(John) 12:12-16'
+    >>> unwrap("에베소서 3:6-13)")
+    '에베소서 3:6-13'
+    """
+    text = word.strip()
+    while len(text) > 1:
+        first, last = text[0], text[-1]
+        if BRACKET_PAIRS.get(first) == last or (first == last and first in SYMMETRIC_WRAPPERS):
+            text = text[1:-1].strip()
+        elif first in BRACKET_PAIRS and BRACKET_PAIRS[first] not in text:
+            text = text[1:].strip()
+        elif last in BRACKET_PAIRS.values() and not any(
+                opener in text for opener, closer in BRACKET_PAIRS.items() if closer == last):
+            text = text[:-1].strip()
+        else:
+            return text
+    return text
+
+
+def in_figures(match: re.Match[str]) -> str:
+    """
+    Rewrite one spelled-out reference as figures.
+
+    :param match: A :data:`SPELLED_REFERENCE` match
+    :return: The same reference as ``3:16``, or ``3:16-18`` for a range
+
+    >>> SPELLED_REFERENCE.sub(in_figures, "2장 1절에서 10절")
+    '2:1-10'
+    >>> SPELLED_REFERENCE.sub(in_figures, "1장 26절에서 2장 3절")
+    '1:26-2:3'
+    >>> SPELLED_REFERENCE.sub(in_figures, "9장 14-29절")
+    '9:14-29'
+    """
+    chapter, verse, end_chapter, end_verse = match.groups()
+    if not end_verse:
+        return f"{chapter}:{verse}"
+    return f"{chapter}:{verse}-{end_chapter}:{end_verse}" if end_chapter else f"{chapter}:{verse}-{end_verse}"
+
+
 def check_verse(
     word: str,
     ask: str,
@@ -86,6 +181,11 @@ def check_verse(
 ) -> tuple[str, str] | None:
     """
     Judge one bible reference.
+
+    A reference can be wrong in more than one way at once — ``마가복음9;1-8`` is
+    three of them — so the mechanical rewrites are applied in turn and their
+    reasons joined, rather than the first one found being reported alone. A row
+    fixed one defect per pass would need one apply-and-rescrape round for each.
 
     :param word: The reference as the site stores it
     :param ask: What to suggest when only a person can settle it
@@ -96,26 +196,65 @@ def check_verse(
     >>> check_verse("요한복음 3:16", "look it up")
     >>> check_verse("요한복은 3:16", "look it up")
     ('요한복은 is one letter from 요한복음', '요한복음 3:16')
+    >>> check_verse("출애굽기 2장 1절에서 10절", "look it up")
+    ('chapter and verse spelled out', '출애굽기 2:1-10')
     >>> check_verse("", "look it up")
     ('missing', 'look it up')
     """
     if word in placeholders:
         return "missing", ask
-    if MISTYPED_COLON.search(word):
-        return "semicolon where a colon belongs", MISTYPED_COLON.sub(r"\1:\2", word)
 
-    found = BOOK.match(word)
+    reasons: list[str] = []
+    fixed = word
+
+    unwrapped = unwrap(fixed)
+    if unwrapped != fixed:
+        fixed = unwrapped
+        reasons.append("punctuation wrapped round the reference")
+
+    # Run after unwrapping, so a reference wrapped whole is already bare and only
+    # brackets holding the book name on its own are left to find.
+    debracketed = BRACKETED_BOOK.sub(r"\1", fixed)
+    if debracketed != fixed:
+        fixed = debracketed
+        reasons.append("brackets round the book name")
+
+    if TILDE_RANGE.search(fixed):
+        fixed = TILDE_RANGE.sub(r"\1-\2", fixed)
+        reasons.append("tilde where a hyphen belongs")
+
+    if MISTYPED_COLON.search(fixed):
+        fixed = MISTYPED_COLON.sub(r"\1:\2", fixed)
+        reasons.append("semicolon where a colon belongs")
+
+    in_words = SPELLED_REFERENCE.sub(in_figures, fixed)
+    if ":" in in_words:
+        in_words = TRAILING_VERSE.sub(r"\1", in_words)
+    if in_words != fixed:
+        fixed = in_words
+        reasons.append("chapter and verse spelled out")
+
+    found = BOOK.match(fixed)
     if found:
         spelled = found.group(1)
         closed = spelled.replace(" ", "")
         if closed in books and spelled != closed:
-            return "space inside the book name", word.replace(spelled, closed, 1)
-        if len(closed) > 2 and closed not in books and not closed.startswith(tuple(books)):
+            fixed = fixed.replace(spelled, closed, 1)
+            reasons.append("space inside the book name")
+        elif len(closed) > 2 and closed not in books and not closed.startswith(tuple(books)):
             near = sorted(book for book in books if one_edit_apart(closed, book))
-            fixed = word.replace(spelled, near[0], 1) if len(near) == 1 else ""
-            if fixed and cites_chapter(fixed):
-                return f"{closed} is one letter from {near[0]}", fixed
-            return f"{closed!r} is not a book of the bible", ask
-    if not cites_chapter(word):
+            corrected = fixed.replace(spelled, near[0], 1) if len(near) == 1 else ""
+            if not (corrected and cites_chapter(corrected)):
+                return f"{closed!r} is not a book of the bible", ask
+            fixed = corrected
+            reasons.append(f"{closed} is one letter from {near[0]}")
+
+    # Re-matched, because closing up a space inside the name moves where it ends.
+    found = BOOK.match(fixed)
+    if found and found.group(1) in books and fixed[found.end():found.end() + 1].isdigit():
+        fixed = f"{fixed[:found.end()]} {fixed[found.end():]}"
+        reasons.append("no space between the book and the chapter")
+
+    if not cites_chapter(fixed):
         return "no chapter:verse", ask
-    return None
+    return ("; ".join(reasons), fixed) if reasons else None

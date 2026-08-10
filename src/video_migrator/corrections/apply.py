@@ -18,8 +18,27 @@ import pathlib
 from ..ledger import read_ledger, write_ledger
 
 #: A ``new`` value in parentheses is a question for a person rather than a value
-#: to write — "(look it up in the bulletin)" — so it is never applied.
-ASK_MARKER = "("
+#: to write — "(look it up in the bulletin)" — so it is never applied. The
+#: brackets have to enclose the *whole* value: a reference can legitimately open
+#: with one, as ``(John) 12:12-16`` does, and reading that as a question leaves
+#: no way to write it back at all.
+ASK_MARKERS = ("(", ")")
+
+
+def is_question(value: str) -> bool:
+    """
+    Is this a note to a person rather than a value to write?
+
+    :param value: A ledger row's ``new``
+    :return: True when the whole value is wrapped in parentheses
+
+    >>> is_question("(look it up in the bulletin)")
+    True
+    >>> is_question("(John) 12:12-16")
+    False
+    """
+    opener, closer = ASK_MARKERS
+    return value.startswith(opener) and value.endswith(closer)
 
 
 def decide(on_site: str, recorded: str, suggested: str) -> str:
@@ -69,7 +88,7 @@ def applicable(row: dict[str, str], field_input: dict[str, str], kinds: set[str]
         return None
     if kinds and row["field"] not in kinds:
         return None
-    if not row["new"] or row["new"].startswith(ASK_MARKER):
+    if not row["new"] or is_question(row["new"]):
         return None
     return field_input.get(row["field"])
 

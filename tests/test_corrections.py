@@ -91,6 +91,132 @@ class TestVerses:
         """
         assert check_verse("요한복음 3:16; 로마서 8:1", ASK) is None
 
+    def test_a_chapter_run_on_against_the_book_is_spaced(self):
+        """The book and the chapter are two things, and the site writes them as one."""
+        assert check_verse("마가복음9:1-8", ASK) == ("no space between the book and the chapter", "마가복음 9:1-8")
+
+    def test_a_space_is_added_after_the_book_name_is_closed_up(self):
+        """
+        Closing up a space inside the name moves where the name ends.
+
+        Both defects appear together — the space was typed in the wrong place
+        rather than merely omitted — so the second rule has to read the first
+        one's output, not the value the site holds.
+        """
+        assert check_verse("사무엘 상1:26-2:3", ASK) == (
+            "space inside the book name; no space between the book and the chapter",
+            "사무엘상 1:26-2:3",
+        )
+
+    @pytest.mark.parametrize(("spelled", "figures"), [
+        ("출애굽기 2장 1절에서 10절", "출애굽기 2:1-10"),
+        ("출애굽기 17장 8절부터 16절", "출애굽기 17:8-16"),
+        ("사무엘상 1장 26절에서 2장 3절", "사무엘상 1:26-2:3"),
+        ("요한복음 3장 16절", "요한복음 3:16"),
+        ("예레미야 23장 9절, 29절", "예레미야 23:9, 29"),
+        ("다니엘 12장 3절로 4절", "다니엘 12:3-4"),
+        # Either 절 may be left implied, on the range's end or on its start.
+        ("민수기 3장 11절-13", "민수기 3:11-13"),
+        ("마가복음 9장 14-29절", "마가복음 9:14-29"),
+    ])
+    def test_a_reference_spelled_out_is_written_in_figures(self, spelled, figures):
+        """
+        The board's own style is ``3:16``, and 장/절 says the same thing at length.
+
+        :param spelled: The reference as the site stores it
+        :param figures: The same reference in the style the board keeps
+        """
+        assert check_verse(spelled, ASK) == ("chapter and verse spelled out", figures)
+
+    @pytest.mark.parametrize(("wrapped", "bare"), [
+        ("<요한복음 6장 15절에서 21절>", "요한복음 6:15-21"),
+        ("(누가복음 23장 43절)", "누가복음 23:43"),
+    ])
+    def test_punctuation_wrapped_round_a_reference_is_taken_off(self, wrapped, bare):
+        """
+        The board's style has no brackets round a reading.
+
+        :param wrapped: The reference as the site stores it
+        :param bare: The reading on its own
+        """
+        reason, fixed = check_verse(wrapped, ASK)
+        assert fixed == bare
+        assert reason.startswith("punctuation wrapped round the reference")
+
+    @pytest.mark.parametrize(("bracketed", "bare"), [
+        ("(John) 12:12-16", "John 12:12-16"),
+        ("[요한복음] 3:16", "요한복음 3:16"),
+    ])
+    def test_brackets_round_the_book_name_come_off(self, bracketed, bare):
+        """
+        The brackets say nothing the reference does not, and the board has none.
+
+        The name comes out of them rather than the opening bracket being struck
+        off on its own — that leaves ``John) 12:12-16``, which is worse than
+        what it replaced and which no later rule can see is wrong.
+
+        :param bracketed: The reference as the site stores it
+        :param bare: The reading with its book name unbracketed
+        """
+        assert check_verse(bracketed, ASK) == ("brackets round the book name", bare)
+
+    def test_a_reference_that_types_a_chapter_for_a_verse_is_left_whole(self):
+        """
+        ``3장 1장에서 10장`` says 장 where it means 절, three times over.
+
+        Read as far as it parses it becomes ``3:1장에서 10장`` — a value worse
+        than the one it replaced, because half of it now looks deliberate. A
+        verse number must say 절 or say nothing, never name a chapter.
+        """
+        assert check_verse("출애굽기 3장 1장에서 10장", ASK) is None
+
+    def test_a_hyphen_used_as_a_wrapper_is_not_read_as_a_range(self):
+        """
+        A hyphen opens a reference as often as an angle bracket does here.
+
+        Each end is stripped on its own rather than as a matched pair, because
+        the pair is usually mismatched — and an abbreviated book name survives
+        it, being no business of this rule's.
+        """
+        reason, fixed = check_verse("-요 11장 38절에서 44절-", ASK)
+        assert fixed == "요 11:38-44"
+        assert reason.startswith("punctuation wrapped round the reference")
+
+    def test_a_tilde_between_verses_is_the_range_hyphen(self):
+        """The board writes a range with a hyphen; the tilde is the same thing typed."""
+        assert check_verse("요한복음 3:16~18", ASK) == ("tilde where a hyphen belongs", "요한복음 3:16-18")
+
+    def test_a_chapter_alone_is_left_spelled_out(self):
+        """
+        ``23편`` and ``3장`` name a whole chapter, which ``3:`` cannot express.
+
+        Rewriting one would have to invent a verse, so the rule only fires where
+        a verse was written out to convert.
+        """
+        assert check_verse("시편 23편", ASK) is None
+        assert check_verse("요한복음 3장", ASK) is None
+
+    def test_a_range_of_chapters_is_not_read_as_verses(self):
+        """
+        ``15-16장`` is two chapters, and ``15:16`` would be one verse of one.
+
+        The numbers sit on the wrong side of 장 for the rule to reach, which is
+        what keeps a chapter range from being rewritten into a reading nobody
+        gave.
+        """
+        assert check_verse("이사야 15-16장", ASK) is None
+
+    def test_every_defect_in_one_reference_is_reported_at_once(self):
+        """
+        A row fixed one defect per pass costs an apply-and-rescrape round each.
+
+        :meta note: 마가복음9;1-8 is a run-on book, a mistyped colon, and would
+            still be wrong after either fix alone.
+        """
+        reason, fixed = check_verse("마가복음9;1-8", ASK)
+        assert fixed == "마가복음 9:1-8"
+        assert reason == "semicolon where a colon belongs; no space between the book and the chapter"
+
     def test_a_correction_that_would_still_be_wrong_is_not_offered(self):
         """
         Fixing the book but leaving no chapter would raise the same row again
@@ -316,6 +442,17 @@ class TestApply:
         every recovered answer from ever being applied.
         """
         row = {"updated_at": "", "field": "verse", "new": "요한복음 3:16", "reason": "missing"}
+        assert applicable(row, self.INPUTS) == "word"
+
+    def test_a_value_that_merely_opens_with_a_bracket_is_still_a_value(self):
+        """
+        A question is wrapped in parentheses; a reference may only begin with one.
+
+        Reading ``(John) 12:12-16`` as a note left the two records holding it
+        with no way to be written back at all — the repair sat in the ledger
+        being silently skipped every round.
+        """
+        row = {"updated_at": "", "field": "verse", "new": "(John) 12:12-16"}
         assert applicable(row, self.INPUTS) == "word"
 
     def test_history_is_not_work(self):

@@ -14,6 +14,7 @@ here.
 """
 
 import re
+import time
 
 import requests
 from playwright.sync_api import sync_playwright  # noqa: F401  (re-exported for callers)
@@ -29,6 +30,14 @@ LOGIN_PATH = "/core/admin/login/login.php"
 WRITE_PATH = "/core/admin/vod/write.php"
 
 
+#: How many times to ask the public endpoint before giving up on a record, and
+#: how long to wait after each failure. A correction run makes two of these reads
+#: per record and takes hours over a few hundred, so a connection dropped once —
+#: which this site does — must not be what decides the run is over.
+READ_ATTEMPTS = 4
+READ_BACKOFF = 5
+
+
 def public_record(endpoint: str, num: str, page_code: str, vod_type: str = "1") -> dict[str, str]:
     """
     Read a record from the public endpoint, independently of the admin session.
@@ -37,19 +46,32 @@ def public_record(endpoint: str, num: str, page_code: str, vod_type: str = "1") 
     what the site actually serves, rather than against the status code of the
     request that made it.
 
+    A dropped connection is retried rather than raised, because the read is not
+    the work — it is the confirmation of work already done, and a run that dies
+    on one is a run whose completed edits go unrecorded.
+
     :param endpoint: The public record endpoint to POST to
     :param num: Record id
     :param page_code: Board the record belongs to
     :param vod_type: The board's media type
     :return: The record's public fields
-    :raises requests.RequestException: If the endpoint cannot be reached
+    :raises requests.RequestException: If the endpoint cannot be reached at all
     """
-    body = requests.post(
-        endpoint,
-        data={"pageCode": page_code, "num": num, "vodType": vod_type},
-        headers={"User-Agent": "Mozilla/5.0"},
-        timeout=30,
-    ).text
+    for attempt in range(1, READ_ATTEMPTS + 1):
+        try:
+            body = requests.post(
+                endpoint,
+                data={"pageCode": page_code, "num": num, "vodType": vod_type},
+                headers={"User-Agent": "Mozilla/5.0"},
+                timeout=30,
+            ).text
+            break
+        except requests.RequestException as error:
+            if attempt == READ_ATTEMPTS:
+                raise
+            print(f"      reading num={num} failed ({type(error).__name__}), "
+                  f"retrying in {READ_BACKOFF * attempt}s")
+            time.sleep(READ_BACKOFF * attempt)
     out = {}
     for tag in PUBLIC_FIELDS:
         found = re.search(rf"<{tag}><!\[CDATA\[(.*?)\]\]></{tag}>", body, re.S)
