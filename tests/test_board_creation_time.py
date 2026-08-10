@@ -2,6 +2,7 @@
 """Test script for creation_time based on board type."""
 
 import json
+import shutil
 import subprocess
 from pathlib import Path
 
@@ -60,7 +61,16 @@ def create_test_video(output_path: Path) -> None:
 
 @pytest.fixture
 def test_video_file(tmp_path):
-    """Create a temporary test video file."""
+    """
+    Create a temporary test video file.
+
+    These tests need a real media file to write metadata into, so they need
+    ffmpeg on the PATH. It is a system package rather than a Python dependency,
+    which no virtualenv brings with it — so its absence is reported as a skip
+    rather than five errors that look like broken code.
+    """
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("needs ffmpeg on the PATH to build a real video file")
     video_path = tmp_path / "test_input.mp4"
     create_test_video(video_path)
     yield video_path
