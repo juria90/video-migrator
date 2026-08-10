@@ -53,6 +53,36 @@ _QUIET_CORRECTION = 1
 #: for is not buried behind a number.
 SERVICE_PART_TITLE_FORMAT = "{title} ({part})"
 
+#: A marker naming which numbered service of the day a recording is, including a
+#: joint service of two of them. It deliberately does not match 영상, which says
+#: a recording is a video of a service rather than which service it was.
+#:
+#: A series part ("설교 제목 강해 2부") is indistinguishable from a service part
+#: by shape alone and is read as one. That is the same assumption
+#: :func:`service_key` already makes, and it errs towards telling two recordings
+#: apart rather than merging them.
+NUMBERED_SERVICE_PART = re.compile(r"\d[\d,]*부(?:\s*연합)?")
+
+
+def numbered_service_part(title: str) -> str:
+    """
+    Read which of the day's services a title names, if it names one.
+
+    :param title: Title, already normalized
+    :return: The marker as the title writes it, or empty where it names none
+
+    >>> numbered_service_part("설교 제목 (2부)")
+    '2부'
+    >>> numbered_service_part("설교 제목 (2부 연합)")
+    '2부 연합'
+    >>> numbered_service_part("설교 제목 1부 영상")
+    '1부'
+    >>> numbered_service_part("설교 제목 영상")
+    ''
+    """
+    match = NUMBERED_SERVICE_PART.search(title)
+    return match.group(0) if match else ""
+
 
 def take_service_part(video: Video, pattern: re.Pattern[str]) -> None:
     """
@@ -177,6 +207,10 @@ def fix_video_metadata(videos: list[Video], profile: Profile | None = None, boar
         # Normalize preacher names
         if video.artist in profile.preacher_names:
             video.artist = profile.preacher_names[video.artist]
+
+        # Read back out of the title, which is where the part ends up whether the
+        # site put it there or take_service_part just moved it.
+        video.service_part = numbered_service_part(video.title)
 
     if board is not None and board.weekday_index is not None:
         correct_publish_dates(videos, board, profile.max_publish_date_drift, profile.service_parts)
@@ -370,7 +404,7 @@ def validate_videos(videos: list[Video], profile: Profile | None = None, board: 
                 off_weekday.append((i, video.title, publish_date, date.strftime("%A")))
 
         preacher = video.artist
-        if preacher and not has_preacher_title(preacher, profile):
+        if preacher and not has_preacher_title(preacher, profile, board):
             invalid_preachers.append((i, video.title, preacher))
 
     if invalid_brackets:
@@ -390,9 +424,9 @@ def validate_videos(videos: list[Video], profile: Profile | None = None, board: 
             print(f"  {idx}. {title}: '{date}' is a {day}")
 
     if invalid_preachers:
-        expected = f"ending with {', '.join(repr(t) for t in profile.valid_preacher_titles)}"
-        if profile.valid_preacher_prefixes:
-            expected += f" or starting with {', '.join(repr(p) for p in profile.valid_preacher_prefixes)}"
+        expected = f"ending with {', '.join(repr(t) for t in profile.preacher_titles(board))}"
+        if profile.preacher_prefixes(board):
+            expected += f" or starting with {', '.join(repr(p) for p in profile.preacher_prefixes(board))}"
         print(f"\nWarning: Found videos with preacher not {expected}:")
         for idx, title, preacher in invalid_preachers:
             print(f"  {idx}. {title}: '{preacher}'")
@@ -411,16 +445,20 @@ def validate_videos(videos: list[Video], profile: Profile | None = None, board: 
 _TRAILING_AFFILIATION = re.compile(r"\s*\([^()]*\)$")
 
 
-def has_preacher_title(preacher: str, profile: Profile) -> bool:
+def has_preacher_title(preacher: str, profile: Profile, board: Board | None = None) -> bool:
     """
-    Check whether a preacher's name carries a title the profile recognizes.
+    Check whether a name carries a title its board recognizes.
 
     Korean titles follow the name and English ones precede it, so a name
-    qualifies on either of the profile's two lists.
+    qualifies on either of the two lists. A board that credits performers rather
+    than preachers overrides both; where the two lists come back empty there is
+    no vocabulary to hold a name to, and every name passes.
 
-    :param preacher: Preacher name, already normalized
+    :param preacher: Preacher or performer name, already normalized
     :param profile: Site profile supplying the recognized titles
-    :return: True if the name carries a recognized title
+    :param board: The board the name came from, where it overrides the profile
+    :return: True if the name carries a recognized title, or if the board asks
+        for no check at all
 
     >>> profile = load_profile("churchlove")
     >>> has_preacher_title("홍길동 목사", profile)
@@ -431,11 +469,18 @@ def has_preacher_title(preacher: str, profile: Profile) -> bool:
     True
     >>> has_preacher_title("Jane Roe", profile)
     False
+    >>> has_preacher_title("Jane Roe", profile, profile.board("choir_praise"))
+    True
     """
-    name = _TRAILING_AFFILIATION.sub("", preacher).strip()
-    if any(name.endswith(title) for title in profile.valid_preacher_titles):
+    titles = profile.preacher_titles(board)
+    prefixes = profile.preacher_prefixes(board)
+    if not titles and not prefixes:
         return True
-    return any(name.startswith(prefix) for prefix in profile.valid_preacher_prefixes)
+
+    name = _TRAILING_AFFILIATION.sub("", preacher).strip()
+    if any(name.endswith(title) for title in titles):
+        return True
+    return any(name.startswith(prefix) for prefix in prefixes)
 
 
 def _has_matching_brackets(text: str) -> bool:

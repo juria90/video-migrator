@@ -26,6 +26,11 @@ class Video:
     year: str = ""
     genre: str = ""
     language: str = ""
+    #: Which of a day's services this recording is, as the marker the site uses
+    #: ("2부"). Empty on a board that holds one service a day, and on a row that
+    #: names none. It stays in the title as well, since that is where
+    #: :func:`~video_migrator.metadata.normalize.service_key` looks.
+    service_part: str = ""
 
     def __post_init__(self):
         """Extract year from publish_date and detect language if not already set."""

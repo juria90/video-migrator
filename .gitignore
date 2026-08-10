@@ -50,10 +50,22 @@ Thumbs.db
 # Scrape output - regenerable, keep it out of history
 *.csv
 
-# config/ and data/ describe the real site and the real people on it: profiles,
-# credentials, scrape output, and working notes taken from it. Ignore both
-# wholesale rather than by extension — the rule has to hold for the next file
-# type someone reaches for, not just the ones used so far. The publishable
-# example profiles live in src/video_migrator/profiles/ instead.
+# Each directory under sites/ is one source site: its profile, its correction
+# ledger, its scraped data, and the working notes taken from it — all of which
+# name the real people the site is about. Each is a separate private repository,
+# cloned into place; git does not recurse into an ignored path, so nothing about
+# them, not even their existence, reaches this repository.
+#
+# Ignore the contents rather than the directory, so the README explaining what
+# belongs there can still be tracked. Anchored to the root, so an unrelated
+# sites/ elsewhere in the tree is unaffected.
+/sites/*
+!/sites/README.md
+
+# config/ holds credentials that are not tied to any one site — the OAuth client
+# secret for uploading. data/ is scrape output. Ignore both wholesale rather than
+# by extension: the rule has to hold for the next file type someone reaches for,
+# not just the ones used so far. The publishable example profiles live in
+# src/video_migrator/profiles/ instead.
 config/*
 data/*

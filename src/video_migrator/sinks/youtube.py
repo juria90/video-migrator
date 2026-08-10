@@ -94,8 +94,19 @@ CLIENT_SECRETS_FILE = _find_client_secrets_file()
 # This OAuth 2.0 access scope allows an application to upload files to the
 # authenticated user's YouTube channel, but doesn't allow other types of access.
 YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
+
+# Reading back which channel the credentials belong to is a read, which the
+# upload scope alone does not permit. It is requested so that a migration can
+# check where it is about to put several hundred videos.
+YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
+
+YOUTUBE_SCOPES = (YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE)
+
 YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
+
+#: Environment variable naming the channel uploads are expected to land on.
+CHANNEL_ENV_VAR = "YOUTUBE_CHANNEL"
 
 # This variable defines a message to display if the CLIENT_SECRETS_FILE is
 # missing.
@@ -115,6 +126,15 @@ https://developers.google.com/api-client-library/python/guide/aaa_client_secrets
 """
 
 VALID_PRIVACY_STATUSES = ("public", "private", "unlisted")
+
+#: The only privacy status a scheduled publication is accepted from. A video
+#: given a publishAt while public or unlisted is rejected outright, since
+#: scheduling means "private until then".
+SCHEDULABLE_PRIVACY_STATUS = "private"
+
+#: Time of day given to a recording date supplied as a bare ``YYYY-MM-DD``.
+#: recordingDetails.recordingDate wants a full RFC 3339 timestamp.
+RECORDING_TIME_OF_DAY = "T00:00:00Z"
 
 # YouTube video categories
 # Source: https://gist.github.com/dgp/1b24bf2961521bd75d6c
@@ -137,20 +157,34 @@ VIDEO_CATEGORIES = {
 }
 
 
+def credentials_path() -> str:
+    """
+    Where the OAuth token granted by the consent flow is cached.
+
+    :return: Path to the token file
+    """
+    return f"{sys.argv[0]}-oauth2.json"
+
+
 def get_authenticated_service(args: argparse.Namespace) -> Resource:
     """
     Authenticate and build the YouTube service.
+
+    The channel an upload lands on is fixed here rather than by any later
+    request: the token this returns is bound to whichever account, or Brand
+    Account, was chosen at the consent screen, and ``videos.insert`` has no say
+    in it. :func:`verify_channel` is the check that the right one was chosen.
 
     :param args: Command-line arguments containing OAuth configuration
     :return: Authenticated YouTube service object
     """
     flow = flow_from_clientsecrets(
         CLIENT_SECRETS_FILE,
-        scope=YOUTUBE_UPLOAD_SCOPE,
+        scope=" ".join(YOUTUBE_SCOPES),
         message=MISSING_CLIENT_SECRETS_MESSAGE,
     )
 
-    storage = Storage(f"{sys.argv[0]}-oauth2.json")
+    storage = Storage(credentials_path())
     credentials = storage.get()
 
     if credentials is None or credentials.invalid:
@@ -163,16 +197,118 @@ def get_authenticated_service(args: argparse.Namespace) -> Resource:
     )
 
 
-def initialize_upload(youtube: Resource, options: argparse.Namespace) -> None:
+def expected_channel(options: argparse.Namespace) -> str:
     """
-    Initialize and start the video upload process.
+    The channel uploads are meant to land on, if anything says.
+
+    :param options: Options that may carry ``--channel``
+    :return: The channel id or title to insist on, empty to skip the check
+    """
+    return getattr(options, "channel", None) or os.environ.get(CHANNEL_ENV_VAR, "")
+
+
+def authenticated_channel(youtube: Resource) -> tuple[str, str]:
+    """
+    Read back which channel the credentials actually belong to.
 
     :param youtube: Authenticated YouTube service object
-    :param options: Command-line options containing video metadata
+    :return: The channel's id and its title
+    :raises ValueError: If the credentials own no channel, or predate the read
+        scope that this needs
+    """
+    try:
+        response = youtube.channels().list(part="snippet", mine=True).execute()
+    except HttpError as e:
+        if e.resp.status != 403:
+            raise
+        raise ValueError(
+            f"Cannot read back which channel these credentials belong to. The cached token at "
+            f"{credentials_path()} was granted before {YOUTUBE_READONLY_SCOPE} was asked for. "
+            f"Delete that file and run again to consent afresh."
+        ) from e
+
+    items = response.get("items") or []
+    if not items:
+        raise ValueError("The authenticated account owns no YouTube channel to upload to.")
+    return items[0]["id"], items[0]["snippet"]["title"]
+
+
+def verify_channel(youtube: Resource, expected: str) -> None:
+    """
+    Refuse to upload unless the credentials belong to the expected channel.
+
+    Which channel an upload lands on is decided at the consent screen and cannot
+    be corrected afterwards, so a token minted against the wrong account sends
+    every video of a migration somewhere that has to be emptied by hand. One
+    read before the first byte moves is worth that.
+
+    Either the channel's id or its title satisfies the check. An id is the
+    reliable form: a title is a display name, and renaming the channel would
+    turn a correct configuration into a failing one.
+
+    :param youtube: Authenticated YouTube service object
+    :param expected: Channel id or title to insist on, empty to skip the check
+    :raises ValueError: If the credentials belong to some other channel
+    """
+    if not expected:
+        return
+
+    channel_id, title = authenticated_channel(youtube)
+    if expected not in (channel_id, title):
+        raise ValueError(
+            f"These credentials belong to channel {title!r} (id {channel_id}), not {expected!r}. "
+            f"Delete {credentials_path()} and consent again as the right account, or correct "
+            f"--channel / ${CHANNEL_ENV_VAR}."
+        )
+
+
+def as_recording_timestamp(recording_date: str) -> str:
+    """
+    Widen a recording date to the timestamp the API asks for.
+
+    :param recording_date: Date as ``YYYY-MM-DD``, or a full RFC 3339 timestamp
+    :return: The timestamp to send
+
+    >>> as_recording_timestamp("2026-08-02")
+    '2026-08-02T00:00:00Z'
+    >>> as_recording_timestamp("2026-08-02T10:30:00Z")
+    '2026-08-02T10:30:00Z'
+    """
+    return recording_date if "T" in recording_date else recording_date + RECORDING_TIME_OF_DAY
+
+
+def build_body(options: argparse.Namespace) -> dict:
+    """
+    Assemble the resource describing the video being inserted.
+
+    Only the parts actually being set are included, since the request's ``part``
+    is derived from this mapping's keys: sending an empty ``recordingDetails``
+    would ask the API to clear it.
+
+    ``recordingDate`` is where the date a recording belongs to goes. It is the
+    one date the API will accept in the past — ``publishAt`` schedules forwards
+    only, and ``snippet.publishedAt`` is read-only and set to the moment the
+    video goes public.
+
+    :param options: Options carrying the video metadata
+    :return: The request body
+    :raises ValueError: If a publication is scheduled from a privacy status
+        other than private, which the API rejects
     """
     tags = None
     if options.keywords:
         tags = options.keywords.split(",")
+
+    status = {"privacyStatus": options.privacyStatus}
+    publish_at = getattr(options, "publishAt", None)
+    if publish_at:
+        if options.privacyStatus != SCHEDULABLE_PRIVACY_STATUS:
+            raise ValueError(
+                f"--publishAt schedules a video to become public later, so it is only accepted on a "
+                f"{SCHEDULABLE_PRIVACY_STATUS!r} video; got {options.privacyStatus!r}. "
+                f"Pass --privacyStatus {SCHEDULABLE_PRIVACY_STATUS}, or drop --publishAt."
+            )
+        status["publishAt"] = publish_at
 
     body = {
         "snippet": {
@@ -181,8 +317,24 @@ def initialize_upload(youtube: Resource, options: argparse.Namespace) -> None:
             "tags": tags,
             "categoryId": str(options.category),
         },
-        "status": {"privacyStatus": options.privacyStatus, "publishAt": options.publishAt},
+        "status": status,
     }
+
+    recording_date = getattr(options, "recordingDate", None)
+    if recording_date:
+        body["recordingDetails"] = {"recordingDate": as_recording_timestamp(recording_date)}
+    return body
+
+
+def initialize_upload(youtube: Resource, options: argparse.Namespace) -> None:
+    """
+    Initialize and start the video upload process.
+
+    :param youtube: Authenticated YouTube service object
+    :param options: Command-line options containing video metadata
+    :raises ValueError: If the metadata combination is one the API rejects
+    """
+    body = build_body(options)
 
     # Call the API's videos.insert method to create and upload the video.
     # https://developers.google.com/youtube/v3/docs/videos/insert
@@ -270,7 +422,22 @@ def create_argument_parser() -> argparse.ArgumentParser:
     )
     argparser.add_argument(
         "--publishAt",
-        help="ISO 8601 format datetime to publish the video (e.g., 2024-12-31T23:59:00Z)",
+        help="RFC 3339 datetime to make the video public at, in the future (e.g., 2026-12-31T23:59:00Z). "
+        + f"Requires --privacyStatus {SCHEDULABLE_PRIVACY_STATUS}.",
+        default=None,
+    )
+    argparser.add_argument(
+        "--channel",
+        default=None,
+        help="Channel id, or title, that uploads must land on. The upload aborts if the credentials "
+        + f"belong to any other channel. Defaults to ${CHANNEL_ENV_VAR}; omit both to skip the check. "
+        + "An id is the reliable form, since a title can be renamed.",
+    )
+    argparser.add_argument(
+        "--recordingDate",
+        help="Date the video was recorded, YYYY-MM-DD or a full RFC 3339 datetime. May be in the past, "
+        + "unlike --publishAt; it is the only place an original date is preserved, since the upload date "
+        + "is set by YouTube and cannot be changed.",
         default=None,
     )
     return argparser
@@ -283,9 +450,12 @@ def upload(options: argparse.Namespace) -> None:
     This is the entry point registered in :data:`video_migrator.sinks.SINKS`.
 
     :param options: Options carrying the file path, video metadata and OAuth settings
+    :raises ValueError: If the metadata combination is one the API rejects, or the
+        credentials belong to a channel other than the one asked for
     :raises googleapiclient.errors.HttpError: If the upload fails unrecoverably
     """
     youtube = get_authenticated_service(options)
+    verify_channel(youtube, expected_channel(options))
     initialize_upload(youtube, options)
 
 
@@ -303,6 +473,8 @@ def main() -> None:
 
     try:
         upload(args)
+    except ValueError as e:
+        sys.exit(str(e))
     except HttpError as e:
         print(f"An HTTP error {e.resp.status} occurred:\n{e.content}")
 

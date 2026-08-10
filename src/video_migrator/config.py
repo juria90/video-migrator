@@ -41,6 +41,17 @@ DEFAULT_PROFILE = "example"
 #: Weekday names a board may declare, in ``datetime.date.weekday()`` order.
 WEEKDAYS = ("monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday")
 
+#: Title an upload is given when a profile names no template of its own. The
+#: date leads because the platform stamps its own upload date on the video and
+#: will not accept the original one, so the title is the only place the date a
+#: recording belongs to survives where a viewer will see it.
+DEFAULT_UPLOAD_TITLE_TEMPLATE = "{date} | {service} | {title} | {artist}"
+
+#: How the ``{date}`` slot is written. Kept as a ``str.format`` template rather
+#: than a ``strftime`` one so that an unpadded month reads the same everywhere:
+#: ``%-m`` is a GNU extension that Windows does not have. Pad with ``{month:02d}``.
+DEFAULT_UPLOAD_DATE_FORMAT = "{year}.{month}.{day}"
+
 
 class _StrictLoader(yaml.SafeLoader):
     """SafeLoader that rejects duplicate mapping keys instead of silently merging."""
@@ -86,6 +97,41 @@ class Board:
     #: Weekday this board's service is held on, lowercase. Empty for a board with
     #: no fixed day, such as a daily prayer meeting or an occasional series.
     weekday: str = ""
+    #: What this board's service is called, for the service segment of an upload
+    #: title. Empty leaves the segment out.
+    service_name: str = ""
+    #: :attr:`service_name` for a record that names which of the day's services
+    #: it is, with a ``{part}`` slot for the marker. Empty falls back to
+    #: :attr:`service_name`, as does a record carrying no part.
+    service_template: str = ""
+    #: Preacher titles accepted on this board, overriding the profile's list. A
+    #: praise board credits a performer, not a preacher, so it needs either its
+    #: own vocabulary or none at all. None inherits the profile's list; an empty
+    #: list, with no prefixes either, turns the check off for this board.
+    valid_preacher_titles: tuple[str, ...] | None = None
+    #: Per-board counterpart of :attr:`Profile.valid_preacher_prefixes`, on the
+    #: same None-inherits rule as :attr:`valid_preacher_titles`.
+    valid_preacher_prefixes: tuple[str, ...] | None = None
+
+    def service_label(self, part: str = "") -> str:
+        """
+        Name this board's service, qualified by which of the day's services it is.
+
+        :param part: The service marker the record carries, empty if it names none
+        :return: The service segment of an upload title, empty when the board
+            declares no name
+
+        >>> sunday = load_profile().board("sunday_sermon")
+        >>> sunday.service_label("2부")
+        '주일 2부 예배'
+        >>> sunday.service_label()
+        '주일예배'
+        >>> load_profile().board("no_such_board").service_label("2부")
+        ''
+        """
+        if part and self.service_template:
+            return self.service_template.format(part=part)
+        return self.service_name
 
     @property
     def weekday_index(self) -> int | None:
@@ -136,6 +182,39 @@ class Profile:
     #: the part itself as its one capture group. Such a part describes the
     #: service rather than the person, so it is moved into the title.
     preacher_service_pattern: str = ""
+    #: Title an upload is given, over ``{date}``, ``{service}``, ``{title}`` and
+    #: ``{artist}``. A slot resolving to nothing takes its separator with it.
+    upload_title_template: str = DEFAULT_UPLOAD_TITLE_TEMPLATE
+    #: How the template's ``{date}`` slot is written, over ``{year}``,
+    #: ``{short_year}``, ``{month}`` and ``{day}``.
+    upload_date_format: str = DEFAULT_UPLOAD_DATE_FORMAT
+
+    def preacher_titles(self, board: Board | None = None) -> tuple[str, ...]:
+        """
+        The preacher titles that count as valid on a board.
+
+        :param board: The board being validated, or None for the profile's own list
+        :return: The titles to accept, the board's own where it declares any
+
+        >>> load_profile().preacher_titles()[0]
+        ' 목사'
+        >>> load_profile().preacher_titles(load_profile().board("choir_praise"))
+        ()
+        """
+        if board is not None and board.valid_preacher_titles is not None:
+            return board.valid_preacher_titles
+        return self.valid_preacher_titles
+
+    def preacher_prefixes(self, board: Board | None = None) -> tuple[str, ...]:
+        """
+        The preacher name prefixes that count as valid on a board.
+
+        :param board: The board being validated, or None for the profile's own list
+        :return: The prefixes to accept, the board's own where it declares any
+        """
+        if board is not None and board.valid_preacher_prefixes is not None:
+            return board.valid_preacher_prefixes
+        return self.valid_preacher_prefixes
 
     @property
     def board_names(self) -> tuple[str, ...]:
@@ -166,6 +245,22 @@ class Profile:
             if board.name == name:
                 return board
         return Board(name=name)
+
+
+def _optional_tuple(entry: dict, key: str) -> tuple[str, ...] | None:
+    """
+    Read a list a board may override, telling "not declared" from "declared empty".
+
+    The difference is the whole point of the override: an absent key inherits the
+    profile's list, while an empty one turns the check off for that board.
+
+    :param entry: The board's parsed YAML mapping
+    :param key: Key to read
+    :return: The declared values, or None where the board declares none
+    """
+    if key not in entry:
+        return None
+    return tuple(entry[key] or ())
 
 
 def _parse(name: str, data: dict) -> Profile:
@@ -200,6 +295,10 @@ def _parse(name: str, data: dict) -> Profile:
                 # A page code is written unquoted in YAML, so it arrives as an int.
                 page_code=str(entry.get("page_code", "")),
                 weekday=weekday,
+                service_name=entry.get("service_name", ""),
+                service_template=entry.get("service_template", ""),
+                valid_preacher_titles=_optional_tuple(entry, "valid_preacher_titles"),
+                valid_preacher_prefixes=_optional_tuple(entry, "valid_preacher_prefixes"),
             )
         )
     if not boards:
@@ -207,6 +306,7 @@ def _parse(name: str, data: dict) -> Profile:
 
     site = data.get("site") or {}
     normalize = data.get("normalize") or {}
+    upload = data.get("upload") or {}
     drift = int(normalize.get("max_publish_date_drift", 1))
     if not 0 <= drift <= 6:
         raise ValueError(f"profile {name!r}: max_publish_date_drift must be 0-6, got {drift}")
@@ -224,6 +324,8 @@ def _parse(name: str, data: dict) -> Profile:
         max_publish_date_drift=drift,
         service_parts=tuple(normalize.get("service_parts") or ()),
         preacher_service_pattern=normalize.get("preacher_service_pattern", ""),
+        upload_title_template=upload.get("title_template", DEFAULT_UPLOAD_TITLE_TEMPLATE),
+        upload_date_format=upload.get("date_format", DEFAULT_UPLOAD_DATE_FORMAT),
     )
 
 
@@ -237,6 +339,9 @@ def _override_paths(name: str) -> list[Path]:
     paths = []
     if env_path := os.environ.get(CONFIG_ENV_VAR):
         paths.append(Path(env_path))
+    # A site keeps everything about itself in one directory, its profile
+    # included. config/ is where profiles used to live, and still works.
+    paths.append(Path("sites") / name / f"{name}.yaml")
     paths.append(Path("config") / f"{name}.yaml")
     return paths
 
@@ -261,6 +366,7 @@ def load_profile(name: str = DEFAULT_PROFILE) -> Profile:
     packaged = files("video_migrator").joinpath("profiles", f"{name}.yaml")
     if not packaged.is_file():
         raise FileNotFoundError(
-            f"No profile named {name!r}. Looked in ${CONFIG_ENV_VAR}, ./config/{name}.yaml, and the packaged profiles."
+            f"No profile named {name!r}. Looked in ${CONFIG_ENV_VAR}, ./sites/{name}/{name}.yaml, "
+            f"./config/{name}.yaml, and the packaged profiles."
         )
     return _parse(name, yaml.load(packaged.read_text(encoding="utf-8"), Loader=_StrictLoader))

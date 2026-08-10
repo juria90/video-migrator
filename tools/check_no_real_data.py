@@ -70,13 +70,25 @@ ALLOWED_HANGUL = {
     "강해",
     "제",
     "장",
+    "편",
     "부",
     "예배",
     "부예배",
     "부설교",
     "영상",
+    "주일",
     "주일예배",
     "감사",
+    "연합",
+    # Generic names for the services a Korean church holds. These describe the
+    # kind of meeting, not who holds it, so they identify no one.
+    "새벽예배",
+    "수요기도회",
+    "금요성령집회",
+    "특별집회",
+    "워십",
+    "봉헌송",
+    "성가대",
     # CMS labels and strings a fixture or scraper has to reproduce
     "본문",
     "설교자",
@@ -87,9 +99,33 @@ ALLOWED_HANGUL = {
     "맨끝",
     "바로",
     "보기",
-    # Software and scripture named in prose
+    # Software named in prose
     "교회사랑넷",
-    "요한복음",
+    # The books of the bible, which a verse rule checks against as a closed set.
+    # They name scripture, not anybody on the site, so they identify no one.
+    "창세기", "출애굽기", "레위기", "민수기", "신명기", "여호수아", "사사기", "룻기",
+    "사무엘상", "사무엘하", "열왕기상", "열왕기하", "역대상", "역대하", "에스라",
+    "느헤미야", "에스더", "욥기", "시편", "잠언", "전도서", "아가", "이사야",
+    "예레미야", "예레미야애가", "에스겔", "다니엘", "호세아", "요엘", "아모스",
+    "오바댜", "요나", "미가", "나훔", "하박국", "스바냐", "학개", "스가랴", "말라기",
+    "마태복음", "마가복음", "누가복음", "요한복음", "사도행전", "로마서",
+    "고린도전서", "고린도후서", "갈라디아서", "에베소서", "빌립보서", "골로새서",
+    "데살로니가전서", "데살로니가후서", "디모데전서", "디모데후서", "디도서",
+    "빌레몬서", "히브리서", "야고보서", "베드로전서", "베드로후서", "요한일서",
+    "요한이서", "요한삼서", "유다서", "요한계시록",
+    # Malformations of one of them, invented to exercise the near-miss rule:
+    # a substitution, an insertion and a deletion.
+    "요한복은",
+    "요한복음서",
+    "한복음",
+    # The halves a book name splits into when a space is typed inside it, which
+    # is the case the rule closes back up.
+    "요한",
+    "복음",
+    # A name equidistant from two real books, which the rule must refuse to guess.
+    "사무엘장",
+    # Two edits from a real book, which is beyond what the rule will correct.
+    "예배소서",
     # Hangul syllable range bounds in models.py
     "가",
     "힣",
@@ -97,6 +133,10 @@ ALLOWED_HANGUL = {
 
 #: Where the site-specific terms live. Ignored by git, so this file never names
 #: the real site; absent on a fresh clone, where the check simply does not run.
+FORBIDDEN_TERMS_FILES = sorted(pathlib.Path("sites").glob("*/forbidden-terms.txt"))
+
+#: Where the terms used to live, before a site kept everything about itself in
+#: one directory. Still read, so an older checkout keeps working.
 FORBIDDEN_TERMS_FILE = pathlib.Path("config/forbidden-terms.txt")
 
 #: A Vimeo id below this is inside the range Vimeo has handed out, so it may well
@@ -133,14 +173,21 @@ def tracked_files() -> list[pathlib.Path]:
 
 def load_forbidden_terms() -> list[str]:
     """
-    Read the site-specific terms, if this checkout has them.
+    Read the site-specific terms, from every site this checkout has.
 
-    :return: Terms to search for, lowercased; empty when the file is absent
+    Each site names its own, since only it knows what identifies it. A checkout
+    with no sites cloned into place contributes none, which is why this check
+    never blocks a fresh clone.
+
+    :return: Terms to search for, lowercased; empty when no site supplies any
     """
-    if not FORBIDDEN_TERMS_FILE.is_file():
-        return []
-    lines = FORBIDDEN_TERMS_FILE.read_text(encoding="utf-8").splitlines()
-    return [line.strip().lower() for line in lines if line.strip() and not line.startswith("#")]
+    terms = []
+    for path in [*FORBIDDEN_TERMS_FILES, FORBIDDEN_TERMS_FILE]:
+        if not path.is_file():
+            continue
+        lines = path.read_text(encoding="utf-8").splitlines()
+        terms += [line.strip().lower() for line in lines if line.strip() and not line.startswith("#")]
+    return terms
 
 
 def check(path: pathlib.Path, forbidden: list[str]) -> list[str]:

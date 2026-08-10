@@ -10,7 +10,7 @@ The pipeline has four stages, and each one is pluggable:
 4. **Upload** to the destination platform (YouTube, ...)
 
 The shipped profiles are generic examples; point one at a real site by adding a
-profile under `config/`. Sources, sinks and scrapers are pluggable — new
+profile under `sites/`. Sources, sinks and scrapers are pluggable — new
 sources, sinks and scrapers are added by dropping a module into the matching
 package and registering it — see [Extending](#extending).
 
@@ -19,6 +19,7 @@ package and registering it — see [Extending](#extending).
 - [Features](#features)
 - [Development Environment Setup](#development-environment-setup)
 - [Pipeline Stages](#pipeline-stages)
+- [Correcting the source site](#correcting-the-source-site)
 - [Usage](#usage)
 - [Extending](#extending)
 - [Testing](#testing)
@@ -138,6 +139,91 @@ Override the tool with e.g. `make test UV=uvx`.
 
 All four exchange a single record type, `video_migrator.models.Video`.
 
+## Correcting the source site
+
+A migration is only as good as what it reads. Where the source site's own
+records are wrong — a mis-typed date, a preacher never entered, a video whose
+link is gone — normalization repairs what it can on the way past, and the rest
+has to be fixed at the source.
+
+That is a second loop alongside the pipeline, and it turns on one artifact:
+
+```
+scrape ──► .cache/       ──► build ledger ──► ledger ◄── review, research, judgement
+                                                │
+                                                ▼
+                                      apply ──► the site
+                                                │
+                                                └── stamp, then scrape again
+```
+
+### The ledger
+
+One row per field per record. A row says what the field holds, what it should
+hold, why, and where the new value came from:
+
+```
+num  date  field  old  new  reason  source  updated_at
+```
+
+`updated_at` does the work of two files. Blank means outstanding; a timestamp
+means applied — so the same file is the queue and the history of what was done.
+Nothing has to be reconciled by hand, and a change is never recorded twice.
+
+Two kinds of writer share it. A **scan** fills what rules can see: a book name
+that is not a book, a title off the house style, a field left empty. A **person**
+fills what rules cannot: a name read out of a printed bulletin, a wording
+decision, a verdict of "checked, correct as it stands". Hence the one invariant
+that matters — **a scan may revise its own rows and never anyone else's.** A
+rule that can only say "missing" must not overwrite an answer someone spent an
+afternoon establishing.
+
+A value in parentheses — `(look it up in last Sunday's bulletin)` — is a note to
+a person, and the applier refuses it for want of anything to write.
+
+### Two forms of crawled data
+
+The scrape leaves two artifacts, and they are not interchangeable:
+
+| | holds | read by |
+|---|---|---|
+| `.cache/` | records exactly as the site stores them | the ledger |
+| `sites/<site>/data/<site>-<board>.csv` | records after normalization | the migration |
+
+The ledger **must** read the cache. The CSV holds what normalization *made* of a
+record — dates corrected, fields moved, titles rewritten — so a row built from
+it would describe a value the site has never held, and the applier would refuse
+it as changed-since-the-scan.
+
+### Applying
+
+Writes are deliberate by construction:
+
+- nothing is sent without `--apply`, and the batch size defaults to one;
+- a record whose field already holds the target is skipped, so a stale ledger
+  costs nothing and an interrupted run is safe to repeat;
+- a record holding *neither* the scanned value nor the proposed one has been
+  edited by hand since — that edit wins, and the row is left alone;
+- a row is stamped only after the new value has been **read back from the public
+  side of the site**, so a timestamp means the change was seen from outside, not
+  merely submitted.
+
+Fields are grouped by record: one page load and one save per record, however
+many of its fields are being corrected.
+
+### What is generic, and what is not
+
+| | where |
+|---|---|
+| Ledger schema, merge rules, apply/skip/diverge decision, verification | `video_migrator` |
+| The admin driver for one CMS | `video_migrator.admin`, named after the software |
+| Field vocabulary — valid titles, house style, name lists | the site profile |
+| Credentials, board codes, admin URLs, the ledger itself | `sites/<site>/` — a private repo |
+
+Scrapers are named after site *software* rather than a site, and the admin
+drivers follow the same rule: one driver serves every site running that CMS,
+and a second site needs a profile rather than code.
+
 ## Usage
 
 ### 1. List videos on the source site
@@ -148,7 +234,7 @@ Installed as `video-migrator-list`, or run as `uv run python -m video_migrator.c
 # Scrape early morning prayer videos (default board of the default profile)
 video-migrator-list
 
-# Scrape a board on your own site profile under config/
+# Scrape a board on your own site profile under sites/
 video-migrator-list -P mysite -b sunday_sermon
 
 # Scrape specific board with custom options
@@ -322,11 +408,11 @@ via `SINKS`, pointing at an upload callable.
 modules are named after the *site software*, not the site — `gnuboard.py` parses
 any [GnuBoard](https://github.com/gnuboard/gnuboard5) gallery board, and
 `churchlove.py` parses any site on the 교회사랑넷 CMS. A real profile lives under
-`config/` and so cannot be registered in the package; it names its software
+`sites/` and so cannot be registered in the package; it names its software
 itself instead:
 
 ```yaml
-# config/another_church.yaml
+# sites/another_church/another_church.yaml
 site:
   board_url: https://www.another-church.org/main/sub.html
   scraper: churchlove        # the profile whose scraper parses this site
@@ -431,7 +517,10 @@ All test files follow the `test_*.py` naming convention and use pytest fixtures 
 │   └── instructions/
 │       └── mermaid.instructions.md  # Diagram conventions (Copilot path-scoped)
 │
-├── config/                        # Configuration files
+├── sites/                         # One directory per source site (see sites/README.md)
+│   └── <yoursite>/                # A private repo cloned into place — gitignored
+│
+├── config/                        # Credentials not tied to any one site
 │   └── client_secrets.json        # OAuth credentials (gitignored)
 │
 ├── src/                           # Source code directory
@@ -441,7 +530,7 @@ All test files follow the `test_*.py` naming convention and use pytest fixtures 
 │       ├── config.py              # Site profile loading (see Configuration)
 │       ├── cli.py                 # Listing CLI (video-migrator-list)
 │       ├── profiles/              # Shipped site profiles
-│       │   ├── example.yaml       # Shipped default; real ones live in config/
+│       │   ├── example.yaml       # Shipped default; real ones live in sites/
 │       │   └── churchlove.yaml    # Example profile for the 교회사랑넷 CMS
 │       ├── scrapers/              # Stage 1: discover videos on a website
 │       │   ├── __init__.py        # SCRAPERS registry
@@ -488,7 +577,7 @@ Adding a board or a preacher alias is a config edit.
 | Precedence | Location | Use for |
 |---|---|---|
 | 1 | `$VIDEO_MIGRATOR_CONFIG` | Point at any file; overrides everything |
-| 2 | `./config/<name>.yaml` | **Your real site profile — gitignored** |
+| 2 | `./sites/<name>/<name>.yaml` | **Your real site profile — a private repo** |
 | 3 | `src/video_migrator/profiles/<name>.yaml` | The shipped, publishable examples |
 
 The examples live inside the package so an installed CLI works without a
@@ -497,15 +586,18 @@ Two ship today: `example.yaml` for a GnuBoard site and `churchlove.yaml` for one
 on the 교회사랑넷 CMS.
 
 **A real profile names real people** — preacher aliases are personal data — so
-**`config/` and `data/` are gitignored wholesale**, not by extension: profiles,
-credentials, scrape output and any working notes taken from the site all belong
-there, and the rule has to hold for the next file type someone reaches for. Only
-the generic examples under `src/video_migrator/profiles/` are committed. To
-describe an actual site, copy the example that matches its software:
+everything about an actual site lives under **`sites/<name>/`, ignored
+wholesale** rather than by extension: its profile, its correction ledger, its
+scrape output and any working notes taken from it. Each such directory is meant
+to be a separate private repository cloned into place, which keeps the boundary
+where the sensitivity is; see `sites/README.md`. Only the generic examples under
+`src/video_migrator/profiles/` are committed. To describe an actual site, copy
+the example that matches its software:
 
 ```bash
-cp src/video_migrator/profiles/churchlove.yaml config/mysite.yaml
-$EDITOR config/mysite.yaml
+mkdir -p sites/mysite
+cp src/video_migrator/profiles/churchlove.yaml sites/mysite/mysite.yaml
+$EDITOR sites/mysite/mysite.yaml
 video-migrator-list --profile mysite --board sunday_sermon
 ```
 

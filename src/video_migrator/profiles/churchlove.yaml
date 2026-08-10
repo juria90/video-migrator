@@ -19,6 +19,13 @@ site:
   # is itself registered; a profile under config/ needs it.
   scraper: churchlove
 
+# How an upload is titled. See example.yaml for what each slot means; the date
+# leads because the destination platform stamps its own upload date on a video
+# and will not take the original one.
+upload:
+  title_template: "{date} | {service} | {title} | {artist}"
+  date_format: "{year}.{month}.{day}"
+
 # One entry per board. Order sets the CLI --board choices, and the first entry
 # is the default. weekday is the day the service is held; a publish date one day
 # later is treated as a late upload and pulled back onto it. Omit weekday for a
@@ -26,40 +33,61 @@ site:
 # URL the site's own menu links to. creation_time is the time-of-day stamped
 # into the media file; omit it to use midnight. Keep it quoted — bare 10:30:00
 # is a YAML integer.
+#
+# service_name fills the {service} slot of an upload title, and service_template
+# replaces it on a record naming which of the day's services it is. A praise
+# board credits a performer rather than a preacher, so it empties both preacher
+# lists to accept any name — empty is not the same as omitted, and emptying one
+# alone only narrows the check to the other.
 boards:
   - name: early_morning_prayer
     page_code: 10
     genre: Sermon
     creation_time: "05:30:00"
+    service_name: 새벽예배
   - name: sunday_sermon
     page_code: 9
     weekday: sunday
     genre: Sermon
     creation_time: "10:30:00"
+    service_name: 주일예배
+    service_template: "주일 {part} 예배"
   - name: wednesday_prayer
     page_code: 11
     weekday: wednesday
     genre: Sermon
+    service_name: 수요기도회
   - name: friday_prayer
     page_code: 12
     weekday: friday
     genre: Sermon
     creation_time: "19:30:00"
+    service_name: 금요성령집회
   - name: special_sermon
     page_code: 13
     genre: Sermon
+    service_name: 특별집회
   - name: charisma_praise
     page_code: 15
     weekday: sunday
     genre: Praise
+    service_name: 워십 찬양
+    valid_preacher_titles: []
+    valid_preacher_prefixes: []
   - name: votive_song
     page_code: 16
     weekday: sunday
     genre: Praise
+    service_name: 봉헌송
+    valid_preacher_titles: []
+    valid_preacher_prefixes: []
   - name: choir_praise
     page_code: 17
     weekday: sunday
     genre: Praise
+    service_name: 성가대 찬양
+    valid_preacher_titles: []
+    valid_preacher_prefixes: []
 
 normalize:
   # A service part recorded at the end of a preacher name describes the service,
