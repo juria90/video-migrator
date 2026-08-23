@@ -33,6 +33,10 @@ dev = [
     "pytest>=8.0.0",
     "pytest-cov>=4.1.0",
     "ruff",
+    # Only tools/measure_artifacts.py needs an FFT, and it is run with numpy
+    # supplied for the one command rather than depending on it. Its tests still
+    # have to import it, so numpy is a test dependency — never a shipped one.
+    "numpy",
 ]
 
 [project.scripts]

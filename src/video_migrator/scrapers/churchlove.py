@@ -200,6 +200,7 @@ class ChurchLoveScraper:
             artist=info.get("preacher", ""),
             genre=self.genre,
             language=self.language,
+            num=entry.num,
         )
 
     def get_all_videos(self, max_pages: int | None = None) -> list[Video]:

@@ -17,7 +17,13 @@ import pytest
 from video_migrator.corrections.apply import applicable, decide, stamp_landed
 from video_migrator.corrections.fields import check_preacher, check_title
 from video_migrator.corrections.timeline import cache_age_hours, find_misdated
-from video_migrator.corrections.verses import check_verse, one_edit_apart
+from video_migrator.corrections.verses import (
+    KOREAN_ABBREVIATIONS,
+    KOREAN_BOOKS,
+    abbreviate,
+    check_verse,
+    one_edit_apart,
+)
 from video_migrator.ledger import read_ledger, write_ledger
 
 ASK = "look it up"
@@ -495,3 +501,20 @@ class TestApply:
         assert after["1"] == "2024-06-01 09:00", "the verified row is stamped"
         assert after["2"] == "", "an untouched row is left outstanding"
         assert after["3"] == "2020-01-01 00:00", "an existing stamp is not overwritten"
+
+
+def test_every_book_the_canon_spells_can_also_be_abbreviated() -> None:
+    """
+    The two book lists describe the same canon, so neither may drift alone.
+
+    A name spellable but not abbreviable would publish an upload title holding a
+    full book name among short ones; the reverse would abbreviate a name the
+    verse rules treat as a misspelling.
+    """
+    assert set(KOREAN_ABBREVIATIONS) == KOREAN_BOOKS
+    assert len(set(KOREAN_ABBREVIATIONS.values())) == len(KOREAN_BOOKS)
+    # Abbreviating is idempotent: a short form is not itself a full name, so a
+    # reference that has already been shortened passes through untouched.
+    for full, short in KOREAN_ABBREVIATIONS.items():
+        assert abbreviate(f"{full} 1:1") == f"{short} 1:1"
+        assert abbreviate(f"{short} 1:1") == f"{short} 1:1"

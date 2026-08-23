@@ -52,6 +52,8 @@ ALLOWED_HANGUL = {
     "시리즈",
     "찬양",
     "부제",
+    # "corrected", for a placeholder title standing in for one settled by hand.
+    "고친",
     "하나",
     "둘",
     "셋",
@@ -113,6 +115,14 @@ ALLOWED_HANGUL = {
     "데살로니가전서", "데살로니가후서", "디모데전서", "디모데후서", "디도서",
     "빌레몬서", "히브리서", "야고보서", "베드로전서", "베드로후서", "요한일서",
     "요한이서", "요한삼서", "유다서", "요한계시록",
+    # And the short form of each, which an upload title publishes instead of the
+    # full name. Same argument: they name scripture and identify no one.
+    "창", "출", "레", "민", "신", "수", "삿", "룻", "삼상", "삼하", "왕상", "왕하",
+    "대상", "대하", "스", "느", "에", "욥", "시", "잠", "전", "아", "사", "렘", "애",
+    "겔", "단", "호", "욜", "암", "옵", "욘", "미", "나", "합", "습", "학", "슥", "말",
+    "마", "막", "눅", "요", "행", "롬", "고전", "고후", "갈", "엡", "빌", "골",
+    "살전", "살후", "딤전", "딤후", "딛", "몬", "히", "약", "벧전", "벧후",
+    "요일", "요이", "요삼", "유", "계",
     # Malformations of one of them, invented to exercise the near-miss rule:
     # a substitution, an insertion and a deletion.
     "요한복은",
@@ -136,8 +146,6 @@ ALLOWED_HANGUL = {
     "부터",
     "로",
     "까지",
-    # A book named by its abbreviation, which is still scripture and still nobody.
-    "요",
     # A name equidistant from two real books, which the rule must refuse to guess.
     "사무엘장",
     # Two edits from a real book, which is beyond what the rule will correct.

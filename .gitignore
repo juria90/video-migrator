@@ -47,8 +47,12 @@ Thumbs.db
 *.mov
 *.mkv
 
-# Scrape output - regenerable, keep it out of history
+# Scrape output - regenerable, keep it out of history. The export is TSV now, so
+# an extension rule cannot carry this on its own: a correction ledger is TSV too,
+# and those are the one thing under a site that is meant to be kept. Ignore the
+# site data directories by path instead, and leave ledger/ and history/ tracked.
 *.csv
+/sites/*/data/*
 
 # Each directory under sites/ is one source site: its profile, its correction
 # ledger, its scraped data, and the working notes taken from it — all of which
@@ -59,7 +63,7 @@ Thumbs.db
 # Ignore the contents rather than the directory, so the README explaining what
 # belongs there can still be tracked. Anchored to the root, so an unrelated
 # sites/ elsewhere in the tree is unaffected.
-/sites/*
+# /sites/*
 !/sites/README.md
 
 # config/ holds credentials that are not tied to any one site — the OAuth client

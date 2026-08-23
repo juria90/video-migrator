@@ -18,10 +18,17 @@ site:
   # The profile whose scraper parses this site. Redundant here, since 'churchlove'
   # is itself registered; a profile under config/ needs it.
   scraper: churchlove
+  # Fills the {church} slot of an upload title. A real congregation's name goes
+  # in a profile under config/ or sites/, never in this published one.
+  church: 예시교회
 
-# How an upload is titled. See example.yaml for what each slot means; the date
-# leads because the destination platform stamps its own upload date on a video
-# and will not take the original one.
+# How an upload is titled. See example.yaml for what each slot means. The date
+# has to appear somewhere, because the destination platform stamps its own
+# upload date on a video and will not take the original one.
+#
+# Left generic here. Which slots a site publishes under, and in what order, is
+# that site's own decision rather than anything the CMS dictates, so a real
+# profile under config/ or sites/ overrides both of these.
 upload:
   title_template: "{date} | {service} | {title} | {artist}"
   date_format: "{year}.{month}.{day}"

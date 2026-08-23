@@ -8,6 +8,7 @@ JSON or CSV - the input list for the download/upload stages of a migration.
 
 import argparse
 import csv
+import fnmatch
 import io
 import json
 import sys
@@ -24,17 +25,30 @@ def format_output(videos: list[Video], output_format: str, verbose: bool = False
     Format video data according to specified output format.
 
     :param videos: List of Video objects
-    :param output_format: Output format (json, csv, or text)
+    :param output_format: Output format (json, csv, tsv, or text)
     :param verbose: Whether to include verbose information (for text format)
     :return: Formatted output string
     """
     if output_format == "json":
         return json.dumps([asdict(v) for v in videos], indent=2, ensure_ascii=False)
-    elif output_format == "csv":
+    elif output_format in ("csv", "tsv"):
+        # A tab needs no quoting in any field this pipeline carries, so a TSV
+        # export stays greppable and column-addressable by cut and awk; a title
+        # holding a comma does not survive that in the CSV.
+        # Lines end with ``\n`` on every platform, for the reason
+        # :func:`~video_migrator.ledger.write_ledger` gives: one dated export is
+        # read by diffing it against the last, and a translated line ending
+        # changes every row while changing no value.
         csv_buffer = io.StringIO()
-        csv_writer = csv.writer(csv_buffer, quoting=csv.QUOTE_MINIMAL)
+        csv_writer = csv.writer(
+            csv_buffer,
+            delimiter="\t" if output_format == "tsv" else ",",
+            quoting=csv.QUOTE_MINIMAL,
+            lineterminator="\n",
+        )
         csv_writer.writerow(
             [
+                "num",
                 "Type",
                 "ID",
                 "URL",
@@ -51,6 +65,7 @@ def format_output(videos: list[Video], output_format: str, verbose: bool = False
         for video in videos:
             csv_writer.writerow(
                 [
+                    video.num,
                     video.type,
                     video.id,
                     video.url,
@@ -86,6 +101,93 @@ def format_output(videos: list[Video], output_format: str, verbose: bool = False
                 output += f"   ID: {video.id}\n"
                 output += f"   Embed: {video.embed_url}\n"
         return output
+
+
+#: Prefixed to a preacher pattern to mean "every preacher but this one".
+EXCLUDE = "!"
+
+
+def selects(name: str, patterns: list[str] | None) -> bool:
+    """
+    Does a set of preacher patterns select this name?
+
+    One list expresses both halves of a choice. A pattern is a shell glob, so
+    ``홍길동*`` covers a preacher credited 목사 on one service and 협동목사 on
+    another; prefixed with ``!`` it excludes instead, so ``!김영희 목사`` is
+    every other preacher on the board. Patterns without a wildcard match
+    exactly, which is what most of them are.
+
+    Exclusions are applied after inclusions and win over them, so a list may
+    name a group and then carve a name out of it. A list of exclusions alone
+    means everyone else.
+
+    :param name: The preacher a recording is credited to
+    :param patterns: Patterns to test, or None to select everyone
+    :return: Whether the recording is selected
+
+    >>> selects("김영희 목사", None)
+    True
+    >>> selects("홍길동 목사", ["홍길동 목사"]), selects("김영희 목사", ["홍길동 목사"])
+    (True, False)
+    >>> selects("홍길동 목사", ["!홍길동 목사"]), selects("김영희 목사", ["!홍길동 목사"])
+    (False, True)
+    >>> selects("홍길동 협동목사", ["홍길동*"])
+    True
+    >>> selects("Dr. Doe", ["Dr. *", "!Dr. Doe"])
+    False
+    """
+    if not patterns:
+        return True
+    keep = [pattern for pattern in patterns if not pattern.startswith(EXCLUDE)]
+    drop = [pattern[len(EXCLUDE):] for pattern in patterns if pattern.startswith(EXCLUDE)]
+    if any(fnmatch.fnmatchcase(name, pattern) for pattern in drop):
+        return False
+    return not keep or any(fnmatch.fnmatchcase(name, pattern) for pattern in keep)
+
+
+def keep_preachers(videos: list[Video], patterns: list[str] | None) -> list[Video]:
+    """
+    Narrow a scrape to the recordings a given preacher is, or is not, credited on.
+
+    A destination channel usually belongs to one person, and a board holds
+    everyone who has ever stood in — guests, visiting speakers, a whole
+    conference. Publishing those is a decision about someone else's recording,
+    so the migration is told whose to carry rather than working it out.
+
+    Both halves of that come from one list: naming a preacher selects the
+    channel that is theirs, and ``!`` before the same name selects everything
+    left over for wherever that goes instead. See :func:`selects`.
+
+    :param videos: The scraped videos, already normalized
+    :param patterns: Preacher patterns, or None to keep everyone
+    :return: The videos to carry forward
+
+    >>> videos = [Video(type="v", id="1", url="", embed_url="", title="설교 제목", artist="홍길동 목사"),
+    ...           Video(type="v", id="2", url="", embed_url="", title="설교 제목", artist="김영희 목사")]
+    >>> [v.id for v in keep_preachers(videos, None)]
+    ['1', '2']
+    >>> [v.id for v in keep_preachers(videos, ["홍길동 목사"])]
+    <BLANKLINE>
+    Keeping 1 recording(s) matching 홍길동 목사; 1 left out.
+    ['1']
+    >>> [v.id for v in keep_preachers(videos, ["!홍길동 목사"])]
+    <BLANKLINE>
+    Keeping 1 recording(s) matching !홍길동 목사; 1 left out.
+    ['2']
+    """
+    if not patterns:
+        return videos
+
+    kept = [video for video in videos if selects(video.artist, patterns)]
+    dropped = len(videos) - len(kept)
+    if dropped:
+        print(f"\nKeeping {len(kept)} recording(s) matching {', '.join(patterns)}; {dropped} left out.")
+    credited = {video.artist for video in videos}
+    unmatched = {pattern for pattern in patterns
+                 if not any(fnmatch.fnmatchcase(name, pattern.removeprefix(EXCLUDE)) for name in credited)}
+    if unmatched:
+        print(f"Warning: nothing on this board is credited to {', '.join(sorted(unmatched))}.", file=sys.stderr)
+    return kept
 
 
 def _validate_language(value: str) -> str:
@@ -161,9 +263,9 @@ def create_argument_parser(profile_name: str = DEFAULT_PROFILE) -> argparse.Argu
     parser.add_argument(
         "-f",
         "--format",
-        choices=["json", "text", "csv"],
+        choices=["json", "text", "csv", "tsv"],
         default="text",
-        help="Output format (default: text)",
+        help="Output format (default: text; tsv is the one to write to a file, since a tab needs no quoting)",
     )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show detailed information")
     parser.add_argument(
@@ -181,6 +283,15 @@ def create_argument_parser(profile_name: str = DEFAULT_PROFILE) -> argparse.Argu
         "--no-cache",
         action="store_true",
         help="Disable caching and always fetch fresh content",
+    )
+    parser.add_argument(
+        "--preacher",
+        action="append",
+        metavar="NAME",
+        help="Which preachers to keep, as a shell glob: '홍길동*' covers one credited under more "
+             "than one title, and '!김영희 목사' means every preacher but that one. Without a "
+             "wildcard a pattern matches exactly. Repeatable, and exclusions win over inclusions. "
+             "Omit to keep every preacher on the board.",
     )
 
     return parser
@@ -226,12 +337,18 @@ def main() -> None:
         # Normalize video metadata, reporting what it rewrote
         report_changes(fix_video_metadata(videos, profile, board), args.verbose)
 
+        # After normalization, so that --preacher is matched against the name the
+        # profile settles on rather than whichever way the record happened to
+        # spell it, and before validation, so the warnings are about what will
+        # actually be published.
+        videos = keep_preachers(videos, args.preacher)
+
         # Format output
         output = format_output(videos, args.format, args.verbose)
 
         # Output to file or stdout
         if args.output:
-            with open(args.output, "w", encoding="utf-8") as f:
+            with open(args.output, "w", encoding="utf-8", newline="\n") as f:
                 f.write(output)
             print(f"\nResults saved to: {args.output}")
 
