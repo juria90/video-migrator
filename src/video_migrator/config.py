@@ -182,12 +182,20 @@ class Profile:
     #: the part itself as its one capture group. Such a part describes the
     #: service rather than the person, so it is moved into the title.
     preacher_service_pattern: str = ""
-    #: Title an upload is given, over ``{date}``, ``{service}``, ``{title}`` and
-    #: ``{artist}``. A slot resolving to nothing takes its separator with it.
+    #: Title an upload is given, over ``{church}``, ``{date}``, ``{service}``,
+    #: ``{title}``, ``{quoted_title}``, ``{artist}``, ``{bible_verse}`` and
+    #: ``{short_verse}``. A slot resolving to nothing takes its separator with
+    #: it, so use ``{quoted_title}`` rather than quoting in the template: a
+    #: closing quote written here would belong to the following slot and vanish
+    #: with it.
     upload_title_template: str = DEFAULT_UPLOAD_TITLE_TEMPLATE
     #: How the template's ``{date}`` slot is written, over ``{year}``,
     #: ``{short_year}``, ``{month}`` and ``{day}``.
     upload_date_format: str = DEFAULT_UPLOAD_DATE_FORMAT
+    #: The name the site publishes under, filling the template's ``{church}``
+    #: slot. A real one names a real congregation, so it belongs in a profile
+    #: under ``config/`` or ``sites/`` rather than in a published one here.
+    church: str = ""
 
     def preacher_titles(self, board: Board | None = None) -> tuple[str, ...]:
         """
@@ -326,6 +334,7 @@ def _parse(name: str, data: dict) -> Profile:
         preacher_service_pattern=normalize.get("preacher_service_pattern", ""),
         upload_title_template=upload.get("title_template", DEFAULT_UPLOAD_TITLE_TEMPLATE),
         upload_date_format=upload.get("date_format", DEFAULT_UPLOAD_DATE_FORMAT),
+        church=site.get("church", ""),
     )
 
 

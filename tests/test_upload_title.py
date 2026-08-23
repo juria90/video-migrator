@@ -5,6 +5,7 @@ import dataclasses
 
 import pytest
 
+from video_migrator.cli import keep_preachers
 from video_migrator.config import load_profile
 from video_migrator.metadata.normalize import fix_video_metadata, has_preacher_title
 from video_migrator.metadata.upload_title import format_date, format_upload_title, strip_service_part
@@ -213,3 +214,119 @@ def test_a_board_declaring_no_override_inherits_the_profile(profile) -> None:
     sermon = profile.board("sunday_sermon")
     assert profile.preacher_titles(sermon) == profile.valid_preacher_titles
     assert profile.preacher_prefixes(sermon) == profile.valid_preacher_prefixes
+
+
+@pytest.fixture
+def bracketed(profile):
+    """
+    A profile titling uploads the way a real site's archive does.
+
+    Bracketed church and preacher, an MMDDYY date, the title in quotes and the
+    verse abbreviated — the shipped profile stays generic, so the shape a real
+    site publishes under is declared here instead.
+
+    :param profile: The shipped church-love profile to vary
+    :return: The profile with that template
+    """
+    return dataclasses.replace(
+        profile,
+        church="예시교회",
+        upload_title_template="[{church} - {artist}] {date} {service} | {quoted_title} {short_verse}",
+        upload_date_format="{month:02d}{day:02d}{short_year:02d}",
+    )
+
+
+def test_the_bracketed_template_assembles_every_slot(bracketed) -> None:
+    """
+    Church, preacher, date, service, quoted title and short verse, in order.
+
+    :param bracketed: Site profile supplying the template
+    """
+    video = make_video("설교 제목 (2부)", bible_verse="요한복음 21:15-23", service_part="2부")
+    assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
+            == '[예시교회 - 홍길동 목사] 080226 주일 2부 예배 | "설교 제목" 요 21:15-23')
+
+
+def test_a_record_naming_no_service_takes_the_plain_board_name(bracketed) -> None:
+    """
+    Without a part there is no ``N부`` to announce, so the board's name stands.
+
+    :param bracketed: Site profile supplying the template
+    """
+    video = make_video("설교 제목", bible_verse="요한복음 21:15-23")
+    assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
+            == '[예시교회 - 홍길동 목사] 080226 주일예배 | "설교 제목" 요 21:15-23')
+
+
+def test_a_title_stays_closed_when_the_verse_is_missing(bracketed) -> None:
+    """
+    The quotes belong to the title, not to the slot that happens to follow it.
+
+    Written as literals in the template, the closing quote would belong to
+    ``{short_verse}`` and go missing with it, publishing a title that opens a
+    quote and never closes it.
+
+    :param bracketed: Site profile supplying the template
+    """
+    video = make_video("설교 제목")
+    assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
+            == '[예시교회 - 홍길동 목사] 080226 주일예배 | "설교 제목"')
+
+
+def test_a_bracket_closes_even_without_a_preacher(bracketed) -> None:
+    """
+    A missing preacher takes its separator, leaving the brackets balanced.
+
+    :param bracketed: Site profile supplying the template
+    """
+    video = make_video("설교 제목", artist="", bible_verse="창세기 1:1")
+    assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
+            == '[예시교회] 080226 주일예배 | "설교 제목" 창 1:1')
+
+
+def test_a_verse_the_canon_does_not_spell_is_published_as_it_stands(bracketed) -> None:
+    """
+    An English book name is left alone rather than guessed at.
+
+    :param bracketed: Site profile supplying the template
+    """
+    video = make_video("설교 제목", bible_verse="John 12:12-16")
+    assert format_upload_title(video, bracketed, bracketed.board("sunday_sermon")).endswith(
+        '| "설교 제목" John 12:12-16')
+
+
+def test_no_preacher_given_keeps_the_whole_board() -> None:
+    """Without ``--preacher`` a scrape carries everyone it found."""
+    videos = [make_video("설교 제목 하나"), make_video("설교 제목 둘", artist="김영희 목사")]
+    assert keep_preachers(videos, None) == videos
+    assert keep_preachers(videos, []) == videos
+
+
+def test_a_named_preacher_narrows_the_scrape() -> None:
+    """A channel belonging to one person carries only that person's recordings."""
+    videos = [make_video("설교 제목 하나"), make_video("설교 제목 둘", artist="김영희 목사")]
+    assert [video.artist for video in keep_preachers(videos, ["홍길동 목사"])] == ["홍길동 목사"]
+
+
+def test_a_preacher_credited_two_ways_is_named_twice() -> None:
+    """
+    One person spelled differently on differently-languaged services is one person.
+
+    The filter matches exactly rather than guessing that two spellings are the
+    same name, so both have to be given — and giving both keeps both services.
+    """
+    videos = [make_video("설교 제목 하나"),
+              make_video("설교 제목 둘", artist="Rev. John Doe"),
+              make_video("설교 제목 셋", artist="김영희 목사")]
+    kept = keep_preachers(videos, ["홍길동 목사", "Rev. John Doe"])
+    assert [video.artist for video in kept] == ["홍길동 목사", "Rev. John Doe"]
+
+
+def test_a_preacher_nobody_is_credited_to_warns_rather_than_passing_silently(capsys) -> None:
+    """
+    An empty result is more often a typo in the name than a board without them.
+
+    :param capsys: Fixture capturing what the run reported
+    """
+    assert keep_preachers([make_video("설교 제목")], ["김영희 목사"]) == []
+    assert "nothing on this board is credited to 김영희 목사" in capsys.readouterr().err

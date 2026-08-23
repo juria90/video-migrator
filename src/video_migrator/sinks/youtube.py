@@ -9,8 +9,11 @@ transient network failures.
 
 import argparse
 import http.client
+import logging
 import os
+import pathlib
 import random
+import re
 import sys
 import time
 
@@ -20,7 +23,8 @@ from googleapiclient.errors import HttpError
 from googleapiclient.http import HttpRequest, MediaFileUpload
 from oauth2client.client import flow_from_clientsecrets
 from oauth2client.file import Storage
-from oauth2client.tools import argparser, run_flow
+from oauth2client.tools import argparser as oauth_argparser
+from oauth2client.tools import run_flow
 
 # Explicitly tell the underlying HTTP transport library not to retry, since
 # we are handling retry logic ourselves.
@@ -56,6 +60,9 @@ RETRIABLE_STATUS_CODES = [500, 502, 503, 504]
 #   https://developers.google.com/youtube/v3/guides/authentication
 # For more information about the client_secrets.json file format, see:
 #   https://developers.google.com/api-client-library/python/guide/aaa_client_secrets
+
+
+logger = logging.getLogger(__name__)
 
 
 def _find_client_secrets_file() -> str:
@@ -125,7 +132,39 @@ For more information about the client_secrets.json file format, please visit:
 https://developers.google.com/api-client-library/python/guide/aaa_client_secrets
 """
 
+#: How much of a video is sent per request.
+#:
+#: The obvious value is -1, meaning the whole file in one request, and the
+#: Google sample recommends it. It is wrong for a migration: the request cannot
+#: report progress, and a process that dies mid-upload leaves nothing to resume
+#: from, so a gigabyte already sent is sent again. A finite chunk costs a few
+#: extra round trips and makes an interrupted upload cost a chunk rather than a
+#: file. Must be a multiple of 256 KiB.
+UPLOAD_CHUNK_BYTES = 16 * 1024 * 1024
+
+#: How often to say how far an upload has got. Every chunk is far too often — a
+#: gigabyte in 16 MiB pieces is sixty-odd lines of nearly the same number — and
+#: each report is its own timestamped line rather than one that overwrites
+#: itself, so that afterwards it is possible to see where the time went.
+PROGRESS_SECONDS = 30
+
+#: The longest title YouTube accepts. A longer one is refused outright rather
+#: than truncated, so it is cut here where the reason is visible.
+MAX_TITLE_LENGTH = 100
+
 VALID_PRIVACY_STATUSES = ("public", "private", "unlisted")
+
+#: Whether a video is children's content, which YouTube requires every upload to
+#: declare. Left undeclared it falls back to whatever the channel says, and a
+#: channel that has never been asked says nothing — so it is stated here. A
+#: sermon is not children's content: declaring it so would strip comments, end
+#: screens and personalized recommendations from every recording.
+DEFAULT_MADE_FOR_KIDS = "no"
+
+#: ISO 639-2/B, as a scrape records it, to the BCP-47 tags YouTube wants.
+#: Titles here are Korean, and a video whose language is unstated is guessed at
+#: — which decides which audiences it is offered to.
+LANGUAGE_TAGS = {"kor": "ko", "eng": "en", "spa": "es", "chi": "zh", "jpn": "ja"}
 
 #: The only privacy status a scheduled publication is accepted from. A video
 #: given a publishAt while public or unlisted is rejected outright, since
@@ -157,13 +196,105 @@ VIDEO_CATEGORIES = {
 }
 
 
-def credentials_path() -> str:
+def credentials_path(channel: str = "") -> str:
     """
     Where the OAuth token granted by the consent flow is cached.
 
+    Kept beside ``client_secrets.json``, which is to say under ``config/``,
+    which is gitignored: the token is a credential in its own right, and one
+    that stays valid.
+
+    One token authorizes one channel — which channel is settled at the consent
+    screen and no later request can override it — so a migration publishing to
+    more than one destination holds more than one token, and they cannot share a
+    filename. Consenting for the second channel would otherwise overwrite the
+    first, and the next batch would upload somewhere nobody chose.
+
+    It is deliberately not derived from how the program was invoked. Consenting
+    is a manual step, and a path that moved with ``sys.argv[0]`` meant
+    ``python -m video_migrator.sinks.youtube`` and ``python src/…/youtube.py``
+    cached to different files. Over a migration measured in months that reads as
+    the token having expired, and the fix looks like consenting again rather
+    than like a path bug.
+
+    :param channel: The channel the token is for, empty for the default one
     :return: Path to the token file
+
+    >>> credentials_path().endswith("youtube-oauth2.json")
+    True
+    >>> credentials_path("UC_x5XG1OV2P6uZZ5FSM9Ttw").endswith(
+    ...     "youtube-oauth2-UC_x5XG1OV2P6uZZ5FSM9Ttw.json")
+    True
+    >>> credentials_path("New Life Church / 설교").endswith("youtube-oauth2-New-Life-Church-설교.json")
+    True
     """
-    return f"{sys.argv[0]}-oauth2.json"
+    suffix = re.sub(r"[^\w.-]+", "-", channel).strip("-")
+    name = f"youtube-oauth2-{suffix}.json" if suffix else "youtube-oauth2.json"
+    return os.path.join(os.path.dirname(CLIENT_SECRETS_FILE), name)
+
+
+def resumable_http() -> httplib2.Http:
+    """
+    An HTTP client that will not mistake a part-finished upload for a redirect.
+
+    A resumable upload answers each chunk but the last with ``308 Resume
+    Incomplete``, carrying a ``Range`` header saying how much arrived. httplib2
+    counts 308 among its redirect codes and so looks for a ``Location`` header
+    that a resumable upload never sends, raising instead of returning the
+    response the API client is waiting to read.
+
+    It never came up while the whole file went in one request, because a single
+    request is never part-finished. Sending in chunks — which is what makes an
+    interrupted upload resumable — is what makes 308 arrive at all.
+
+    ``googleapiclient.http.build_http`` does exactly this, and is bypassed here
+    because the client has to be built around credentials.
+
+    :return: The client, with 308 left to the API client to interpret
+    """
+    http = httplib2.Http()
+    http.redirect_codes = http.redirect_codes - {308}
+    return http
+
+
+def existing_credentials(channel: str = "") -> str:
+    """
+    Find the token to use, preferring the one named but settling for the one there is.
+
+    The path a token is stored under is derived from the channel asked for, so a
+    run that names no channel looks for a differently-named file and finds
+    nothing — and consenting is not a cheap thing to do by accident. It opens a
+    browser, it asks a person to pick a channel correctly, and picking wrong
+    binds every upload after it.
+
+    So a run that names no channel uses the one token that exists, if exactly
+    one does. Several, and it has to be told which: guessing there would mean
+    guessing which channel to publish to.
+
+    :param channel: The channel a token is wanted for, empty if unspecified
+    :return: Path to the token to use, which may not exist yet
+    :raises SystemExit: If no channel was named and several tokens exist
+    """
+    named = credentials_path(channel)
+    if channel or os.path.exists(named):
+        return named
+
+    directory = os.path.dirname(CLIENT_SECRETS_FILE)
+    found = sorted(
+        os.path.join(directory, name)
+        for name in os.listdir(directory)
+        if name.startswith("youtube-oauth2") and name.endswith(".json")
+    ) if os.path.isdir(directory) else []
+
+    if len(found) == 1:
+        return found[0]
+    if len(found) > 1:
+        raise SystemExit(
+            "Several channels have been consented to and none was asked for:\n  "
+            + "\n  ".join(found)
+            + f"\nName one with --channel or ${CHANNEL_ENV_VAR}, so that this uploads where you mean it to."
+        )
+    return named
 
 
 def get_authenticated_service(args: argparse.Namespace) -> Resource:
@@ -184,7 +315,7 @@ def get_authenticated_service(args: argparse.Namespace) -> Resource:
         message=MISSING_CLIENT_SECRETS_MESSAGE,
     )
 
-    storage = Storage(credentials_path())
+    storage = Storage(existing_credentials(expected_channel(args)))
     credentials = storage.get()
 
     if credentials is None or credentials.invalid:
@@ -193,7 +324,7 @@ def get_authenticated_service(args: argparse.Namespace) -> Resource:
     return build(
         YOUTUBE_API_SERVICE_NAME,
         YOUTUBE_API_VERSION,
-        http=credentials.authorize(httplib2.Http()),
+        http=credentials.authorize(resumable_http()),
     )
 
 
@@ -201,10 +332,20 @@ def expected_channel(options: argparse.Namespace) -> str:
     """
     The channel uploads are meant to land on, if anything says.
 
+    Stripped, because this usually arrives from a hand-edited ``.env`` read by a
+    shell. Such a file written on Windows ends its lines with a carriage return,
+    which survives ``cut`` and turns a correct configuration into a channel name
+    that matches nothing — reported as belonging to the wrong channel, which is
+    alarming and wrong.
+
     :param options: Options that may carry ``--channel``
     :return: The channel id or title to insist on, empty to skip the check
+
+    >>> import argparse
+    >>> expected_channel(argparse.Namespace(channel="a channel" + chr(13)))
+    'a channel'
     """
-    return getattr(options, "channel", None) or os.environ.get(CHANNEL_ENV_VAR, "")
+    return (getattr(options, "channel", None) or os.environ.get(CHANNEL_ENV_VAR, "")).strip()
 
 
 def authenticated_channel(youtube: Resource) -> tuple[str, str]:
@@ -222,9 +363,9 @@ def authenticated_channel(youtube: Resource) -> tuple[str, str]:
         if e.resp.status != 403:
             raise
         raise ValueError(
-            f"Cannot read back which channel these credentials belong to. The cached token at "
-            f"{credentials_path()} was granted before {YOUTUBE_READONLY_SCOPE} was asked for. "
-            f"Delete that file and run again to consent afresh."
+            f"Cannot read back which channel these credentials belong to. The cached token under "
+            f"{os.path.dirname(CLIENT_SECRETS_FILE)} was granted before {YOUTUBE_READONLY_SCOPE} "
+            f"was asked for. Delete it and run again to consent afresh."
         ) from e
 
     items = response.get("items") or []
@@ -257,7 +398,7 @@ def verify_channel(youtube: Resource, expected: str) -> None:
     if expected not in (channel_id, title):
         raise ValueError(
             f"These credentials belong to channel {title!r} (id {channel_id}), not {expected!r}. "
-            f"Delete {credentials_path()} and consent again as the right account, or correct "
+            f"Delete {credentials_path(expected)} and consent again as the right account, or correct "
             f"--channel / ${CHANNEL_ENV_VAR}."
         )
 
@@ -300,6 +441,11 @@ def build_body(options: argparse.Namespace) -> dict:
         tags = options.keywords.split(",")
 
     status = {"privacyStatus": options.privacyStatus}
+    status["selfDeclaredMadeForKids"] = getattr(options, "madeForKids", DEFAULT_MADE_FOR_KIDS) == "yes"
+    # Stated either way rather than only when refused. These recordings are
+    # embedded on the church's own pages, so whether a video may be embedded is
+    # a requirement here, not a default worth inheriting from somewhere else.
+    status["embeddable"] = getattr(options, "embeddable", "yes") == "yes"
     publish_at = getattr(options, "publishAt", None)
     if publish_at:
         if options.privacyStatus != SCHEDULABLE_PRIVACY_STATUS:
@@ -310,15 +456,19 @@ def build_body(options: argparse.Namespace) -> dict:
             )
         status["publishAt"] = publish_at
 
-    body = {
-        "snippet": {
-            "title": options.title,
-            "description": options.description,
-            "tags": tags,
-            "categoryId": str(options.category),
-        },
-        "status": status,
+    snippet = {
+        "title": options.title,
+        "description": options.description,
+        "tags": tags,
+        "categoryId": str(options.category),
     }
+    spoken = getattr(options, "language", "") or ""
+    if spoken:
+        tag = LANGUAGE_TAGS.get(spoken, spoken)
+        snippet["defaultLanguage"] = tag
+        snippet["defaultAudioLanguage"] = tag
+
+    body = {"snippet": snippet, "status": status}
 
     recording_date = getattr(options, "recordingDate", None)
     if recording_date:
@@ -326,12 +476,16 @@ def build_body(options: argparse.Namespace) -> dict:
     return body
 
 
-def initialize_upload(youtube: Resource, options: argparse.Namespace) -> None:
+def initialize_upload(youtube: Resource, options: argparse.Namespace,
+                      session_path: pathlib.Path | None = None) -> str | None:
     """
     Initialize and start the video upload process.
 
     :param youtube: Authenticated YouTube service object
     :param options: Command-line options containing video metadata
+    :param session_path: Where to remember the upload session, so that a run
+        interrupted part way can rejoin it rather than start again
+    :return: The id of the video created, or None if the API returned none
     :raises ValueError: If the metadata combination is one the API rejects
     """
     body = build_body(options)
@@ -352,31 +506,74 @@ def initialize_upload(youtube: Resource, options: argparse.Namespace) -> None:
         # practice, but if you're using Python older than 2.6 or if you're
         # running on App Engine, you should set the chunksize to something like
         # 1024 * 1024 (1 megabyte).
-        media_body=MediaFileUpload(options.file, chunksize=-1, resumable=True),
+        media_body=MediaFileUpload(options.file, chunksize=UPLOAD_CHUNK_BYTES, resumable=True),
     )
 
-    resumable_upload(insert_request)
+    return resumable_upload(insert_request, session_path)
 
 
-def resumable_upload(insert_request: HttpRequest) -> None:
+def resumable_upload(insert_request: HttpRequest, session_path: pathlib.Path | None = None) -> str | None:
     """
-    Implement an exponential backoff strategy to resume a failed upload.
+    Send a video, surviving both a dropped connection and a dead process.
+
+    Two different interruptions have to be survived here, and they need
+    different answers. A transient error mid-upload is retried with a backoff,
+    which the API client handles as long as the process is alive. A process that
+    dies takes the upload session with it — unless the session's address was
+    written down, which is what ``session_path`` is for.
+
+    A remembered session that the server no longer recognises is not an error:
+    sessions expire, and starting again is the correct response. So a refusal to
+    resume falls back to a fresh upload rather than failing the recording.
 
     :param insert_request: YouTube API insert request object
+    :param session_path: Where to remember the session, and where to look for
+        one to rejoin
+    :return: The id of the video created, or None if the API returned none
     """
+    if session_path is not None and session_path.exists():
+        insert_request.resumable_uri = session_path.read_text(encoding="utf-8").strip()
+        logger.info(f"rejoining the upload session remembered in {session_path}")
+
     response = None
     error = None
     retry = 0
+    reported = 0.0
     while response is None:
         try:
-            print("Uploading file...")
-            status, response = insert_request.next_chunk()
+            try:
+                status, response = insert_request.next_chunk()
+            finally:
+                # Written whether or not the chunk succeeded. The session, and
+                # with it the video resource on YouTube, is created by the first
+                # request; recording it only on success means a run that dies
+                # during that first chunk leaves a video behind that the next run
+                # cannot find and so uploads again. Two abandoned copies of a
+                # sermon is how this came to be in a finally.
+                if session_path is not None and insert_request.resumable_uri:
+                    session_path.parent.mkdir(parents=True, exist_ok=True)
+                    session_path.write_text(insert_request.resumable_uri, encoding="utf-8")
+            if status is not None and time.monotonic() - reported >= PROGRESS_SECONDS:
+                logger.info("%5.1f%% sent", status.progress() * 100)
+                reported = time.monotonic()
             if response is not None:
                 if "id" in response:
-                    print("Video id '{}' was successfully uploaded.".format(response["id"]))
+                    logger.info("uploaded as video %s", response["id"])
+                    if session_path is not None:
+                        session_path.unlink(missing_ok=True)
+                    return response["id"]
                 else:
                     sys.exit(f"The upload failed with an unexpected response: {response}")
         except HttpError as e:
+            # A session the server has forgotten cannot be rejoined, but the
+            # video can still be sent. Forget it too and begin again.
+            if e.resp.status in (404, 410) and insert_request.resumable_uri:
+                logger.info("the remembered upload session has expired; starting the upload again")
+                insert_request.resumable_uri = None
+                insert_request.resumable_progress = 0
+                if session_path is not None:
+                    session_path.unlink(missing_ok=True)
+                continue
             if e.resp.status in RETRIABLE_STATUS_CODES:
                 error = f"A retriable HTTP error {e.resp.status} occurred:\n{e.content}"
             else:
@@ -385,14 +582,14 @@ def resumable_upload(insert_request: HttpRequest) -> None:
             error = f"A retriable error occurred: {e}"
 
         if error is not None:
-            print(error)
+            logger.warning("%s", error)
             retry += 1
             if retry > MAX_RETRIES:
                 sys.exit("No longer attempting to retry.")
 
             max_sleep = 2**retry
             sleep_seconds = random.random() * max_sleep
-            print(f"Sleeping {sleep_seconds:f} seconds and then retrying...")
+            logger.info("retrying in %.1f seconds", sleep_seconds)
             time.sleep(sleep_seconds)
 
 
@@ -400,9 +597,35 @@ def create_argument_parser() -> argparse.ArgumentParser:
     """
     Create and configure the argument parser for the CLI.
 
+    A *new* parser every time, borrowing oauth2client's flags as a parent rather
+    than adding to its module-level one. Adding to that singleton works exactly
+    once: the second call raises ``conflicting option string: --file``, which
+    never happens while a run uploads a single recording and happens on the
+    second recording of every batch.
+
     :return: Configured argument parser
     """
-    argparser.add_argument("--file", required=True, help="Video file to upload")
+    argparser = argparse.ArgumentParser(parents=[oauth_argparser], add_help=True)
+    argparser.add_argument("--file", help="Video file to upload; not needed with --verify-only")
+    argparser.add_argument(
+        "--verify-only", action="store_true",
+        help="Consent if needed, report which channel the credentials belong to, and upload nothing. "
+             "Worth running once before a migration: which channel an upload lands on is decided at "
+             "the consent screen and cannot be corrected afterwards.")
+    argparser.add_argument(
+        "--madeForKids", choices=("yes", "no"), default=DEFAULT_MADE_FOR_KIDS,
+        help=f"Whether this is children's content, which YouTube requires every upload to declare "
+             f"(default: {DEFAULT_MADE_FOR_KIDS})")
+    argparser.add_argument(
+        "--embeddable", choices=("yes", "no"), default="yes",
+        help="Whether other sites may embed the video (default: yes)")
+    argparser.add_argument(
+        "--language", default="",
+        help="Language of the title, description and speech, as ISO 639-2/B or BCP-47")
+    argparser.add_argument(
+        "--session-file",
+        help="Remember the upload session here, so that a run interrupted part way rejoins it "
+             "instead of sending the file again from the start")
     argparser.add_argument("--title", help="Video title", default="Test Title")
     argparser.add_argument("--description", help="Video description", default="Test Description")
     # https://gist.github.com/dgp/1b24bf2961521bd75d6c
@@ -443,20 +666,151 @@ def create_argument_parser() -> argparse.ArgumentParser:
     return argparser
 
 
-def upload(options: argparse.Namespace) -> None:
+#: How many times to ask what became of an upload, and how long to wait between.
+#:
+#: ``videos.insert`` answers as soon as the bytes are received, which is before
+#: YouTube has looked at them. A video too long for an unverified channel is
+#: accepted, given an id, and rejected minutes later during processing — so a
+#: run that trusts the insert records a success for a video nobody can watch,
+#: and a systematic fault sails through a whole batch looking perfect.
+#:
+#: Waiting for processing to *finish* is not the goal and would take an hour.
+#: The goal is to be present long enough to catch a refusal, which arrives
+#: early. Each check costs one quota unit against a daily ten thousand.
+CONFIRM_ATTEMPTS = 5
+CONFIRM_SECONDS = 30
+
+#: What ``status.uploadStatus`` says when YouTube has refused a video outright.
+REFUSED = ("rejected", "failed")
+
+
+def video_status(youtube: Resource, video_id: str) -> tuple[str, str, str]:
+    """
+    Ask what YouTube has made of a video.
+
+    :param youtube: Authenticated YouTube service object
+    :param video_id: The video to ask about
+    :return: Its upload status, its processing status, and the reason for a
+        refusal where there is one
+    :raises ValueError: If YouTube does not know the video
+    """
+    items = youtube.videos().list(part="status,processingDetails", id=video_id).execute().get("items") or []
+    if not items:
+        raise ValueError(f"YouTube does not have a video {video_id}")
+    status = items[0]["status"]
+    processing = (items[0].get("processingDetails") or {}).get("processingStatus", "")
+    reason = status.get("rejectionReason") or status.get("failureReason") or ""
+    return status.get("uploadStatus", ""), processing, reason
+
+
+def confirm_upload(youtube: Resource, video_id: str, attempts: int = CONFIRM_ATTEMPTS,
+                   seconds: int = CONFIRM_SECONDS) -> tuple[str, str]:
+    """
+    Stay with an upload long enough to see whether YouTube refuses it.
+
+    Returns as soon as the answer is settled either way. Still processing when
+    the attempts run out is not a failure and is reported as such — a long
+    recording can transcode for an hour, and the caller has better things to do
+    than watch it.
+
+    :param youtube: Authenticated YouTube service object
+    :param video_id: The video to watch
+    :param attempts: How many times to ask
+    :param seconds: How long to wait between asking
+    :return: The upload status, and the reason for a refusal where there is one
+    """
+    upload_status = processing = reason = ""
+    for attempt in range(attempts):
+        upload_status, processing, reason = video_status(youtube, video_id)
+        if upload_status in REFUSED:
+            logger.warning("%s was refused by YouTube: %s %s", video_id, upload_status, reason)
+            return upload_status, reason
+        if upload_status == "processed":
+            logger.info("%s accepted and processed", video_id)
+            return upload_status, ""
+        if attempt < attempts - 1:
+            time.sleep(seconds)
+    logger.info("%s accepted; still %s after %d checks", video_id, processing or upload_status, attempts)
+    return upload_status, ""
+
+
+def upload_arguments(file: str, title: str, description: str = "", privacy: str = "private",
+                     category: int = 22, recording_date: str = "", channel: str = "",
+                     session_file: str = "", made_for_kids: str = DEFAULT_MADE_FOR_KIDS,
+                     embeddable: str = "yes", language: str = "") -> list[str]:
+    """
+    Build the arguments for one upload.
+
+    Kept here beside the parser that reads them. A caller assembling this list
+    somewhere else has no way to know when an option is renamed or missing, and
+    finds out only when a real upload of a real recording fails on the argument
+    line — which is exactly how this function came to exist.
+
+    :param file: The video to send
+    :param title: What to publish it as; YouTube refuses more than 100 characters
+    :param description: The description to publish
+    :param privacy: One of :data:`VALID_PRIVACY_STATUSES`
+    :param category: YouTube category id
+    :param recording_date: ``YYYY-MM-DD`` the recording belongs to, if known
+    :param channel: Channel the upload must land on, if it must
+    :param session_file: Where to remember the upload session
+    :param made_for_kids: ``yes`` or ``no``, which YouTube requires to be stated
+    :param embeddable: ``yes`` or ``no``, whether other sites may embed it
+    :param language: Language of the title, description and speech
+    :return: Arguments :func:`create_argument_parser` accepts
+
+    >>> args = create_argument_parser().parse_args(
+    ...     upload_arguments("a.mp4", "설교 제목", recording_date="2026-08-02"))
+    >>> args.file, args.title, args.recordingDate, args.privacyStatus
+    ('a.mp4', '설교 제목', '2026-08-02', 'private')
+    """
+    arguments = ["--file", file, "--title", title[:MAX_TITLE_LENGTH],
+                 "--description", description, "--privacyStatus", privacy,
+                 "--category", str(category), "--madeForKids", made_for_kids,
+                 "--embeddable", embeddable]
+    for flag, value in (("--recordingDate", recording_date), ("--channel", channel),
+                        ("--session-file", session_file), ("--language", language)):
+        if value:
+            arguments += [flag, value]
+    return arguments
+
+
+def upload(options: argparse.Namespace) -> str | None:
     """
     Authenticate and upload a single video to YouTube.
 
     This is the entry point registered in :data:`video_migrator.sinks.SINKS`.
 
     :param options: Options carrying the file path, video metadata and OAuth settings
+    :return: The id of the video created, or None if the API returned none
     :raises ValueError: If the metadata combination is one the API rejects, or the
         credentials belong to a channel other than the one asked for
     :raises googleapiclient.errors.HttpError: If the upload fails unrecoverably
     """
     youtube = get_authenticated_service(options)
     verify_channel(youtube, expected_channel(options))
-    initialize_upload(youtube, options)
+    session = getattr(options, "session_file", None)
+    return initialize_upload(youtube, options, pathlib.Path(session) if session else None)
+
+
+def verify(options: argparse.Namespace) -> None:
+    """
+    Consent if the token is not cached yet, and report where uploads would land.
+
+    :param options: Options carrying the OAuth settings
+    :raises ValueError: If the credentials belong to a channel other than the
+        one asked for
+    """
+    expected = expected_channel(options)
+    youtube = get_authenticated_service(options)
+    channel_id, title = authenticated_channel(youtube)
+    logger.info(f"token cached at {credentials_path(expected)}")
+    logger.info(f"uploads would land on {title!r} (channel {channel_id})")
+    if expected:
+        verify_channel(youtube, expected)
+        logger.info(f"matches the {CHANNEL_ENV_VAR} asked for")
+    else:
+        logger.info(f"nothing set in {CHANNEL_ENV_VAR} or --channel, so no channel is being insisted on")
 
 
 def main() -> None:
@@ -468,15 +822,15 @@ def main() -> None:
     parser = create_argument_parser()
     args = parser.parse_args()
 
-    if not os.path.exists(args.file):
-        sys.exit("Please specify a valid file using the --file= parameter.")
+    if not args.verify_only and not (args.file and os.path.exists(args.file)):
+        sys.exit("Please specify a valid file using the --file= parameter, or pass --verify-only.")
 
     try:
-        upload(args)
+        verify(args) if args.verify_only else upload(args)
     except ValueError as e:
         sys.exit(str(e))
     except HttpError as e:
-        print(f"An HTTP error {e.resp.status} occurred:\n{e.content}")
+        logger.info(f"An HTTP error {e.resp.status} occurred:\n{e.content}")
 
 
 if __name__ == "__main__":

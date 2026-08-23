@@ -11,14 +11,26 @@
 
 site:
   board_url: https://example.com/bbs/board.php
+  # Fills the {church} slot of an upload title. Left as a placeholder here: a
+  # real congregation's name belongs in a profile under config/ or sites/.
+  church: 예시교회
 
 # How an upload is titled. The date leads because the destination platform
 # stamps its own upload date on the video and will not take the original one, so
 # this is the only place the date a recording belongs to reaches a viewer.
 #
-# title_template fills {date}, {service}, {title}, {artist} and {bible_verse}.
-# A slot with nothing in it takes the separator before it with it, so a record
-# with no preacher does not publish with a dangling " | ".
+# title_template fills {church}, {date}, {service}, {title}, {quoted_title},
+# {artist}, {bible_verse} and {short_verse}. A slot with nothing in it takes the
+# separator before it with it, so a record with no preacher does not publish
+# with a dangling " | ".
+#
+# {quoted_title} is the title in double quotes. Quote in the template instead
+# and the closing quote belongs to whichever slot follows, so it disappears on
+# any record that slot is empty for, leaving the title opened and never closed.
+#
+# {short_verse} abbreviates the book name the way a bulletin does — 요한복음
+# 21:15-23 becomes 요 21:15-23. A book name that is not Korean, or not spelled
+# the way the canon spells it, is left as it stands.
 #
 # date_format is a str.format template, not strftime: {month} is unpadded and
 # {month:02d} pads, which reads the same on every platform. {short_year} is the

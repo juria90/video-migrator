@@ -5,8 +5,8 @@ Build the title an upload is published under.
 A destination platform stamps its own upload date on a video and will not accept
 the date the recording actually belongs to, so on a back-catalogue migration the
 title is the only place that date survives where a viewer will see it. It
-therefore leads, and the rest of the title is assembled around it from the
-profile's template.
+therefore has to be in the title somewhere, and the rest is assembled around it
+from the profile's template.
 """
 
 import datetime
@@ -14,6 +14,7 @@ import re
 from string import Formatter
 
 from ..config import Board, Profile, load_profile
+from ..corrections.verses import abbreviate
 from ..models import Video
 
 
@@ -140,11 +141,18 @@ def format_upload_title(video: Video, profile: Profile | None = None, board: Boa
     '2026.8.2 | 봉헌송 | 봉헌송 제목'
     """
     profile = profile or load_profile()
+    title = strip_service_part(video.title, video.service_part)
     values = {
         "date": format_date(video.publish_date, profile.upload_date_format),
         "service": board.service_label(video.service_part) if board else "",
-        "title": strip_service_part(video.title, video.service_part),
+        "title": title,
+        # Quoted here rather than in the template, because a closing quote
+        # written there would belong to whatever slot came next and would go
+        # missing with it — leaving a title opened and never closed.
+        "quoted_title": f'"{title}"' if title else "",
         "artist": video.artist,
         "bible_verse": video.bible_verse,
+        "short_verse": abbreviate(video.bible_verse),
+        "church": profile.church,
     }
     return _render(profile.upload_title_template, values)
