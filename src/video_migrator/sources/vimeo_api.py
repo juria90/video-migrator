@@ -84,9 +84,15 @@ def preferred_downloads(downloads: list[dict]) -> list[dict]:
     re-processed of what is left.
 
     The order matters because the first choice is not always served. On this
-    archive every recording from 2010 to 2013 advertises an original and then
-    answers the request for it with a redirect to nowhere, while its renditions
-    — at the same resolution — serve normally.
+    archive 122 recordings — every one of them published between December 2010
+    and September 2013 — advertise an original and then answer the request for
+    it with a redirect to nowhere.
+
+    Every one of those falls back. The rendition carries the same frame size
+    (640x480 throughout, bar a single 400x300) at about two thirds the bitrate,
+    so what is lost is bitrate rather than resolution, and no recording in the
+    archive is left unfetchable. Worth stating plainly because the word
+    "rendition" suggests a downscale and here it is not one.
 
     :param downloads: The ``download`` array of a video resource
     :return: The entries, most wanted first

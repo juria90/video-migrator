@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Tests for the record of what a migration has done and what is left."""
 
+import threading
+
 import pytest
 
 from video_migrator.logs import Ticker
@@ -8,7 +10,9 @@ from video_migrator.plan import (
     COLUMNS,
     DONE,
     STAGES,
+    UNDATED,
     merge,
+    order,
     outstanding,
     read_plan,
     reset,
@@ -240,3 +244,147 @@ def test_a_long_stage_reports_a_bounded_number_of_times() -> None:
         clock[0] = second
         reports += ticker.due()
     assert 20 <= reports <= 45
+
+
+def test_the_plan_runs_oldest_first_rather_than_by_record_id() -> None:
+    """
+    The board's numbering runs backwards through the back-catalogue.
+
+    Sorting by ``num`` would work through 2019 towards 2010 and then jump
+    forward to 2021, which is the order this shape of board produces and not an
+    order anybody wants a migration done in.
+    """
+    plan, _ = merge([], [
+        {"num": "32", "ID": "1", "date": "2019-12-29"},
+        {"num": "489", "ID": "2", "date": "2010-11-07"},
+        {"num": "560", "ID": "3", "date": "2021-01-03"},
+    ])
+    assert [row["num"] for row in plan] == ["489", "32", "560"]
+
+
+def test_a_recording_the_site_never_dated_waits_until_last() -> None:
+    """
+    An undated row sorts on :data:`UNDATED`, not on the empty string.
+
+    Sorting blank first would open a migration with the recordings least is
+    known about, where sorting it last leaves them for someone to look at.
+    """
+    plan, _ = merge([], [{"num": "1", "ID": "1", "date": ""},
+                         {"num": "2", "ID": "2", "date": "2026-08-09"}])
+    assert [row["num"] for row in plan] == ["2", "1"]
+    assert order(plan[1])[0] == UNDATED
+
+
+def test_two_recordings_published_the_same_day_keep_their_record_order() -> None:
+    """A morning and an evening service share a date, and num separates them."""
+    plan, _ = merge([], [{"num": "8", "ID": "1", "date": "2026-08-09"},
+                         {"num": "7", "ID": "2", "date": "2026-08-09"}])
+    assert [row["num"] for row in plan] == ["7", "8"]
+
+
+def test_a_date_corrected_at_the_source_moves_the_recording() -> None:
+    """
+    Dates are corrected on the board like titles are, and the plan follows.
+
+    A recording filed under the wrong year would otherwise keep the position
+    the wrong year gave it for the rest of the migration.
+    """
+    plan, _ = merge([], [{"num": "1", "ID": "1", "date": "2026-01-04"},
+                         {"num": "2", "ID": "2", "date": "2011-06-19"}])
+    assert [row["num"] for row in plan] == ["2", "1"]
+    plan, _ = merge(plan, [{"num": "1", "ID": "1", "date": "2010-01-04"},
+                           {"num": "2", "ID": "2", "date": "2011-06-19"}])
+    assert [row["num"] for row in plan] == ["1", "2"]
+
+
+def test_a_plan_written_before_dates_were_kept_gains_them(tmp_path) -> None:
+    """
+    The column is added to a file that predates it without losing a stage.
+
+    :param tmp_path: Where to write the plan
+    """
+    path = tmp_path / "plan.tsv"
+    older = [column for column in COLUMNS if column != "published"]
+    row = dict.fromkeys(older, "")
+    row.update(num="489", vimeo_id="1", fetched_at="2026-08-22 09:00", youtube_id="aBcDeFgHiJk")
+    path.write_text("\t".join(older) + "\n" + "\t".join(row[column] for column in older) + "\n",
+                    encoding="utf-8", newline="\n")
+
+    plan, _ = merge(read_plan(path), [{"num": "489", "ID": "1", "date": "2010-11-07"}])
+    write_plan(path, plan)
+
+    reread = read_plan(path)
+    assert reread[0]["published"] == "2010-11-07"
+    assert reread[0]["fetched_at"] == "2026-08-22 09:00"
+    assert reread[0]["youtube_id"] == "aBcDeFgHiJk"
+
+
+def test_writing_a_plan_leaves_nothing_beside_it(tmp_path) -> None:
+    """
+    The file it is staged through is moved, not copied and left.
+
+    :param tmp_path: Where to write the plan
+    """
+    path = tmp_path / "plan.tsv"
+    write_plan(path, [planned("1")])
+    assert [child.name for child in tmp_path.iterdir()] == ["plan.tsv"]
+
+
+def test_a_plan_being_rewritten_is_never_seen_half_written(tmp_path) -> None:
+    """
+    A reader either sees the previous plan or the new one, never a truncation.
+
+    Writing over the top of the file would leave a window in which it holds
+    fewer rows than either version, and a run killed inside that window would
+    lose the record of what it had already published.
+
+    :param tmp_path: Where to write the plan
+    """
+    path = tmp_path / "plan.tsv"
+    write_plan(path, [planned(str(n)) for n in range(50)])
+
+    seen = []
+    stop = threading.Event()
+
+    def keep_reading() -> None:
+        while not stop.is_set():
+            seen.append(len(read_plan(path)))
+
+    reader = threading.Thread(target=keep_reading)
+    reader.start()
+    try:
+        for size in (200, 50) * 20:
+            write_plan(path, [planned(str(n)) for n in range(size)])
+    finally:
+        stop.set()
+        reader.join()
+
+    assert seen, "the reader never got a look in"
+    assert set(seen) <= {50, 200}, f"saw a partly written plan: {sorted(set(seen))}"
+
+
+def test_several_threads_stamping_at_once_keep_every_row(tmp_path) -> None:
+    """
+    The driver writes the whole file after each stage, from whichever thread.
+
+    :param tmp_path: Where to write the plan
+    """
+    path = tmp_path / "plan.tsv"
+    rows = [planned(str(n)) for n in range(20)]
+    writing = threading.Lock()
+
+    def stamp(row: dict[str, str]) -> None:
+        for column in ("fetched_at", "measured_at", "repaired_at"):
+            row[column] = "2026-08-23 15:00"
+            with writing:
+                write_plan(path, rows)
+
+    threads = [threading.Thread(target=stamp, args=(row,)) for row in rows]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    written = read_plan(path)
+    assert len(written) == 20
+    assert all(row["repaired_at"] == "2026-08-23 15:00" for row in written)
