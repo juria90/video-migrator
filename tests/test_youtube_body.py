@@ -504,7 +504,9 @@ def test_an_upload_session_is_remembered_even_when_the_chunk_fails(tmp_path, mon
             """
             raise OSError("the connection went away")
 
-    with pytest.raises(SystemExit):
+    # RuntimeError rather than SystemExit: a caller carrying several hundred
+    # recordings must be able to record this one as failed and go on.
+    with pytest.raises(RuntimeError, match="gave up after"):
         resumable_upload(DyingRequest(), session)
 
     assert session.exists(), "the session must survive the failure that created it"

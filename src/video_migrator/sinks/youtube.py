@@ -563,7 +563,7 @@ def resumable_upload(insert_request: HttpRequest, session_path: pathlib.Path | N
                         session_path.unlink(missing_ok=True)
                     return response["id"]
                 else:
-                    sys.exit(f"The upload failed with an unexpected response: {response}")
+                    raise RuntimeError(f"the upload failed with an unexpected response: {response}")
         except HttpError as e:
             # A session the server has forgotten cannot be rejoined, but the
             # video can still be sent. Forget it too and begin again.
@@ -585,7 +585,12 @@ def resumable_upload(insert_request: HttpRequest, session_path: pathlib.Path | N
             logger.warning("%s", error)
             retry += 1
             if retry > MAX_RETRIES:
-                sys.exit("No longer attempting to retry.")
+                # Raised rather than exited. A caller carrying several hundred
+                # recordings has to be able to record this one as failed and
+                # decide for itself whether to go on; SystemExit is not an
+                # Exception, so it goes straight past any handler and takes the
+                # whole run with it.
+                raise RuntimeError(f"gave up after {MAX_RETRIES} retries: {error}")
 
             max_sleep = 2**retry
             sleep_seconds = random.random() * max_sleep

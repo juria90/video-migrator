@@ -30,6 +30,7 @@ COLUMNS = (
     "num",            # the board's record id, the key
     "vimeo_id",       # what to fetch
     "title",          # what it will be published as, for reading the file by eye
+    "published",      # the date the site gave it, which is the order the work is done in
     "fetched_at",     # stage 1: the master is on disk
     "path",           # where, while it is
     "gib",            # how large, for planning the disk
@@ -56,6 +57,12 @@ STAGES = (
 
 #: What a row's stage is once every stage has stamped it.
 DONE = "done"
+
+#: Where a row carrying no date sorts. The site does occasionally publish a
+#: recording without one, and an empty string sorts before every real date —
+#: which would put the rows we know least about at the head of a migration that
+#: runs for weeks.
+UNDATED = "9999-99-99"
 
 
 def now() -> str:
@@ -89,6 +96,13 @@ def write_plan(path: pathlib.Path, rows: list[dict[str, str]]) -> None:
     diffing it against yesterday's, and a translated line ending changes every
     row while changing no value.
 
+    Written to a neighbouring file and moved into place, rather than over the
+    top of the last one. The move is atomic, so a run killed while writing —
+    which is what ^C during a batch invites — leaves the previous plan intact
+    instead of half of this one. That matters more here than the cost: which
+    recording became which video is knowable only from this file, and no amount
+    of reading YouTube back rebuilds it.
+
     :param path: The TSV to write
     :param rows: The rows, in the order they should appear
     :return: None
@@ -96,7 +110,9 @@ def write_plan(path: pathlib.Path, rows: list[dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     lines = ["\t".join(COLUMNS)]
     lines += ["\t".join((row.get(column) or "").replace("\t", " ") for column in COLUMNS) for row in rows]
-    path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    partial = path.with_name(path.name + ".writing")
+    partial.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+    partial.replace(path)
 
 
 def stage_of(row: dict[str, str]) -> str:
@@ -121,6 +137,27 @@ def stage_of(row: dict[str, str]) -> str:
     return DONE
 
 
+def order(row: dict[str, str]) -> tuple[str, int]:
+    """
+    Where a row sits in the plan, and so when its turn comes.
+
+    Oldest first. ``num`` is the board's own record id and reads like a
+    chronological key, but is not one: this archive numbers its back-catalogue
+    the other way about, so working through the file by num walks from 2019
+    backwards to 2010 and then jumps forward again. Only the date the site
+    published under orders the way a reader expects.
+
+    :param row: A plan row
+    :return: A key placing older recordings first and undated ones last
+
+    >>> order({"published": "2011-04-03", "num": "440"})
+    ('2011-04-03', 440)
+    >>> order({"published": "", "num": "7"}) > order({"published": "2026-01-01", "num": "1"})
+    True
+    """
+    return (row.get("published") or UNDATED, int(row["num"]) if row["num"].isdigit() else 0)
+
+
 def merge(plan: list[dict[str, str]], wanted: list[dict[str, str]]) -> tuple[list[dict[str, str]], dict[str, int]]:
     """
     Bring a plan up to date with the recordings that should be in it.
@@ -131,9 +168,9 @@ def merge(plan: list[dict[str, str]], wanted: list[dict[str, str]]) -> tuple[lis
     selection has still been uploaded, and that is the fact worth keeping.
 
     :param plan: The plan as it stands
-    :param wanted: Rows from a scraped export, each with ``num``, ``ID`` and a
-        title already formatted for upload
-    :return: The merged plan and a tally of what happened
+    :param wanted: Rows from a scraped export, each with ``num``, ``ID``, a
+        ``date`` and a title already formatted for upload
+    :return: The merged plan, in :func:`order`, and a tally of what happened
 
     >>> plan, tally = merge([], [{"num": "12", "ID": "34", "title": "설교 제목"}])
     >>> plan[0]["num"], plan[0]["vimeo_id"], stage_of(plan[0])
@@ -143,6 +180,13 @@ def merge(plan: list[dict[str, str]], wanted: list[dict[str, str]]) -> tuple[lis
     >>> plan, tally = merge(plan, [{"num": "12", "ID": "34", "title": "고친 제목"}])
     >>> plan[0]["title"], tally["retitled"], tally["added"]
     ('고친 제목', 1, 0)
+
+    The board's numbering is not chronological, so the plan is not in it:
+
+    >>> plan, _ = merge([], [{"num": "9", "ID": "1", "date": "2026-01-04"},
+    ...                      {"num": "3", "ID": "2", "date": "2011-06-19"}])
+    >>> [row["num"] for row in plan]
+    ['3', '9']
     """
     tally = {"added": 0, "retitled": 0, "unchanged": 0}
     by_num = {row["num"]: row for row in plan}
@@ -161,8 +205,11 @@ def merge(plan: list[dict[str, str]], wanted: list[dict[str, str]]) -> tuple[lis
             tally["retitled"] += 1
         else:
             tally["unchanged"] += 1
+        # Refreshed like the title, and for the same reason: a date corrected at
+        # the source after the plan was written should move the row, not be lost.
+        row["published"] = source.get("date", "") or row.get("published", "")
 
-    plan.sort(key=lambda row: int(row["num"]) if row["num"].isdigit() else 0)
+    plan.sort(key=order)
     return plan, tally
 
 
