@@ -221,7 +221,7 @@ def bracketed(profile):
     """
     A profile titling uploads the way a real site's archive does.
 
-    Bracketed church and preacher, an MMDDYY date, the title in quotes and the
+    Bracketed church and preacher, a YYMMDD date, the title in quotes and the
     verse abbreviated — the shipped profile stays generic, so the shape a real
     site publishes under is declared here instead.
 
@@ -232,7 +232,7 @@ def bracketed(profile):
         profile,
         church="예시교회",
         upload_title_template="[{church} - {artist}] {date} {service} | {quoted_title} {short_verse}",
-        upload_date_format="{month:02d}{day:02d}{short_year:02d}",
+        upload_date_format="{short_year:02d}{month:02d}{day:02d}",
     )
 
 
@@ -244,7 +244,7 @@ def test_the_bracketed_template_assembles_every_slot(bracketed) -> None:
     """
     video = make_video("설교 제목 (2부)", bible_verse="요한복음 21:15-23", service_part="2부")
     assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
-            == '[예시교회 - 홍길동 목사] 080226 주일 2부 예배 | "설교 제목" 요 21:15-23')
+            == '[예시교회 - 홍길동 목사] 260802 주일 2부 예배 | "설교 제목" 요 21:15-23')
 
 
 def test_a_record_naming_no_service_takes_the_plain_board_name(bracketed) -> None:
@@ -255,7 +255,7 @@ def test_a_record_naming_no_service_takes_the_plain_board_name(bracketed) -> Non
     """
     video = make_video("설교 제목", bible_verse="요한복음 21:15-23")
     assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
-            == '[예시교회 - 홍길동 목사] 080226 주일예배 | "설교 제목" 요 21:15-23')
+            == '[예시교회 - 홍길동 목사] 260802 주일예배 | "설교 제목" 요 21:15-23')
 
 
 def test_a_title_stays_closed_when_the_verse_is_missing(bracketed) -> None:
@@ -270,7 +270,7 @@ def test_a_title_stays_closed_when_the_verse_is_missing(bracketed) -> None:
     """
     video = make_video("설교 제목")
     assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
-            == '[예시교회 - 홍길동 목사] 080226 주일예배 | "설교 제목"')
+            == '[예시교회 - 홍길동 목사] 260802 주일예배 | "설교 제목"')
 
 
 def test_a_bracket_closes_even_without_a_preacher(bracketed) -> None:
@@ -281,7 +281,7 @@ def test_a_bracket_closes_even_without_a_preacher(bracketed) -> None:
     """
     video = make_video("설교 제목", artist="", bible_verse="창세기 1:1")
     assert (format_upload_title(video, bracketed, bracketed.board("sunday_sermon"))
-            == '[예시교회] 080226 주일예배 | "설교 제목" 창 1:1')
+            == '[예시교회] 260802 주일예배 | "설교 제목" 창 1:1')
 
 
 def test_a_verse_the_canon_does_not_spell_is_published_as_it_stands(bracketed) -> None:
