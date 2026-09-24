@@ -52,6 +52,16 @@ DEFAULT_UPLOAD_TITLE_TEMPLATE = "{date} | {service} | {title} | {artist}"
 #: ``%-m`` is a GNU extension that Windows does not have. Pad with ``{month:02d}``.
 DEFAULT_UPLOAD_DATE_FORMAT = "{year}.{month}.{day}"
 
+#: Description an upload is given when a profile names no template of its own.
+#: The summary leads because the title already carries the date, the preacher
+#: and the verse, and a viewer sees only the first couple of lines before
+#: expanding. Every slot may be empty — a recording with no summary written yet
+#: publishes the metadata alone, which is what this project published before
+#: summaries existed.
+DEFAULT_UPLOAD_DESCRIPTION_TEMPLATE = (
+    "{summary}\n\n본문: {verse}\n설교: {artist}\n예배: {date} {service}\n{church}"
+)
+
 
 class _StrictLoader(yaml.SafeLoader):
     """SafeLoader that rejects duplicate mapping keys instead of silently merging."""
@@ -192,6 +202,12 @@ class Profile:
     #: How the template's ``{date}`` slot is written, over ``{year}``,
     #: ``{short_year}``, ``{month}`` and ``{day}``.
     upload_date_format: str = DEFAULT_UPLOAD_DATE_FORMAT
+    #: Description an upload is given, over ``{summary}``, ``{title}``,
+    #: ``{date}``, ``{service}``, ``{artist}``, ``{verse}`` and ``{church}``. On
+    #: the same empty-slot rule as :attr:`upload_title_template`, which is what
+    #: lets one template serve a recording whose summary has been written and one
+    #: whose has not.
+    upload_description_template: str = DEFAULT_UPLOAD_DESCRIPTION_TEMPLATE
     #: The name the site publishes under, filling the template's ``{church}``
     #: slot. A real one names a real congregation, so it belongs in a profile
     #: under ``config/`` or ``sites/`` rather than in a published one here.
@@ -334,6 +350,7 @@ def _parse(name: str, data: dict) -> Profile:
         preacher_service_pattern=normalize.get("preacher_service_pattern", ""),
         upload_title_template=upload.get("title_template", DEFAULT_UPLOAD_TITLE_TEMPLATE),
         upload_date_format=upload.get("date_format", DEFAULT_UPLOAD_DATE_FORMAT),
+        upload_description_template=upload.get("description_template", DEFAULT_UPLOAD_DESCRIPTION_TEMPLATE),
         church=site.get("church", ""),
     )
 

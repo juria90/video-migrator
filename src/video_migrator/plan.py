@@ -39,9 +39,10 @@ COLUMNS = (
     "prominence",     # how far that stood above the picture
     "repair",         # the filter chosen, or "none"
     "repaired_at",    # stage 3: the file to upload exists (equal to fetched when repair is none)
-    "youtube_id",     # stage 4: what it became
+    "summarized_at",  # stage 4: the transcript is on disk and a summary file exists
+    "youtube_id",     # stage 5: what it became
     "uploaded_at",
-    "released_at",    # stage 5: the master has been deleted again
+    "released_at",    # stage 6: the master has been deleted again
     "note",           # why a stage did not happen
 )
 
@@ -51,6 +52,7 @@ STAGES = (
     ("fetch", "fetched_at"),
     ("measure", "measured_at"),
     ("repair", "repaired_at"),
+    ("summarize", "summarized_at"),
     ("upload", "uploaded_at"),
     ("release", "released_at"),
 )
@@ -127,7 +129,7 @@ def stage_of(row: dict[str, str]) -> str:
     >>> stage_of({"fetched_at": "2026-08-22 09:00"})
     'measure'
     >>> stage_of({"fetched_at": "x", "measured_at": "x", "repaired_at": "x"})
-    'upload'
+    'summarize'
     >>> stage_of(dict.fromkeys([column for _, column in STAGES], "x"))
     'done'
     """
@@ -220,6 +222,11 @@ STAGE_COLUMNS = {
     "fetch": ("fetched_at", "path", "gib"),
     "measure": ("measured_at", "period", "prominence", "repair"),
     "repair": ("repaired_at",),
+    # The transcript and summary files are deliberately not forgotten here.
+    # Redoing this stage is for producing a *better summary* from a transcript
+    # that already exists; the transcript itself cannot be re-derived once
+    # ``release`` has deleted the master. See ``summarize.py``.
+    "summarize": ("summarized_at",),
     "upload": ("uploaded_at", "youtube_id"),
     "release": ("released_at",),
 }

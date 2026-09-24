@@ -11,11 +11,11 @@ from the profile's template.
 
 import datetime
 import re
-from string import Formatter
 
 from ..config import Board, Profile, load_profile
 from ..corrections.verses import abbreviate
 from ..models import Video
+from .render import render
 
 
 def strip_service_part(title: str, part: str) -> str:
@@ -78,36 +78,6 @@ def format_date(publish_date: str, template: str) -> str:
     return template.format(year=date.year, short_year=date.year % 100, month=date.month, day=date.day)
 
 
-def _render(template: str, values: dict[str, str]) -> str:
-    """
-    Fill a template, dropping the separator in front of every empty slot.
-
-    A record with no preacher or no service should not publish under a title
-    carrying the punctuation that would have set one off. The literal before a
-    slot belongs to that slot and goes with it; the literal opening the template
-    is a prefix on the whole title and only survives while its own slot does.
-
-    :param template: Format string over the keys of ``values``
-    :param values: Slot name -> its rendered value, empty where it has none
-    :return: The filled template, stripped
-    """
-    kept: list[tuple[str, str]] = []
-    trailing = ""
-    for index, (literal, field, _spec, _conversion) in enumerate(Formatter().parse(template)):
-        if field is None:
-            trailing = literal
-            continue
-        value = values.get(field, "").strip()
-        if value:
-            # The first slot to survive opens the title, so it keeps a literal
-            # only where that literal opened the template too.
-            kept.append(("" if not kept and index > 0 else literal, value))
-
-    if not kept:
-        return ""
-    return "".join(literal + value for literal, value in kept).strip() + trailing.rstrip()
-
-
 def format_upload_title(video: Video, profile: Profile | None = None, board: Board | None = None) -> str:
     """
     Build the title a video is uploaded under.
@@ -155,4 +125,4 @@ def format_upload_title(video: Video, profile: Profile | None = None, board: Boa
         "short_verse": abbreviate(video.bible_verse),
         "church": profile.church,
     }
-    return _render(profile.upload_title_template, values)
+    return render(profile.upload_title_template, values)

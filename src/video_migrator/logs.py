@@ -22,6 +22,16 @@ FORMAT = "%(asctime)s.%(msecs)03d %(levelname)-7s %(message)s"
 #: ISO 8601, without the fraction that :data:`FORMAT` adds back.
 DATE_FORMAT = "%Y-%m-%dT%H:%M:%S"
 
+#: Libraries that log one line per HTTP request at INFO, and are asked not to.
+#:
+#: Fetching a Whisper model is thirty-odd requests to huggingface.co, each
+#: logged in full with its query string. That is not this run's progress and it
+#: buries what is: the first time the summarize stage ran for real, the screen
+#: filled with resolve-cache URLs and the run was taken for hung while it was in
+#: fact transcribing. Their warnings still come through — a rate limit or a
+#: failed download is worth hearing about.
+CHATTY = ("httpx", "httpcore", "huggingface_hub", "filelock", "urllib3")
+
 
 def configure(level: int = logging.INFO, stream=None) -> None:
     """
@@ -36,6 +46,8 @@ def configure(level: int = logging.INFO, stream=None) -> None:
     :return: None
     """
     logging.basicConfig(format=FORMAT, datefmt=DATE_FORMAT, level=level, stream=stream, force=True)
+    for name in CHATTY:
+        logging.getLogger(name).setLevel(max(level, logging.WARNING))
 
 
 #: How often a long stage first says how far it has got.

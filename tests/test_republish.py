@@ -14,8 +14,14 @@ import sys
 import pytest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools"))
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "src"))
 
 import republish  # noqa: E402
+
+from video_migrator.config import load_profile  # noqa: E402
+from video_migrator.metadata.summarize import summarize, summary_path, write_text  # noqa: E402
+from video_migrator.metadata.upload_description import format_upload_description  # noqa: E402
+from video_migrator.models import Video  # noqa: E402
 
 OLD = "{month:02d}{day:02d}{short_year:02d}"
 NEW = "{short_year:02d}{month:02d}{day:02d}"
@@ -154,3 +160,162 @@ def test_the_limit_counts_edits_rather_than_rows_looked_at() -> None:
     ]
     assert [row["num"] for row, _s, _w, _n in republish.to_change(decided, 1)] == ["2"]
     assert [row["num"] for row, _s, _w, _n in republish.to_change(decided, None)] == ["2", "3"]
+
+
+def test_released_rows_are_marked_rather_than_sent_back_to_fetch(tmp_path) -> None:
+    """
+    Adding a stage column sends every existing row back to it.
+
+    A released recording reads as summarize-outstanding, and a run would hand it
+    to ``advance``, which would try to re-fetch a master that has been deleted —
+    a gigabyte from Vimeo for each of a hundred and thirty-five videos that are
+    already published. The marking pass is what stands between the new column
+    and that, so it has to run before the stage does.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    plan = [
+        {"num": "1", "released_at": "2026-08-01 10:00", "summarized_at": ""},   # finished
+        {"num": "2", "released_at": "", "summarized_at": ""},                   # still in flight
+        {"num": "3", "released_at": "2026-08-02 10:00", "summarized_at": "x"},  # already marked
+    ]
+    assert republish.mark_summarized(plan) == 1
+
+    assert plan[0]["summarized_at"] == republish.NOT_SUMMARIZED
+    assert plan[1]["summarized_at"] == "", "a recording whose media is still on disk gets summarized"
+    assert plan[2]["summarized_at"] == "x", "an existing stamp is not overwritten"
+
+
+def test_marking_says_the_stage_did_not_run_rather_than_that_it_did() -> None:
+    """
+    A timestamp would claim a transcript exists. None does, and none will.
+    """
+    plan = [{"num": "1", "released_at": "2026-08-01 10:00", "summarized_at": ""}]
+    republish.mark_summarized(plan)
+
+    assert plan[0]["summarized_at"] == "n/a"
+    assert ":" not in plan[0]["summarized_at"], "it must not read like a time"
+
+
+def described(site_dir: pathlib.Path, summary: str, live_description: str = None) -> list:
+    """
+    Decide what one published video's description should become.
+
+    :param site_dir: Where the summary file goes
+    :param summary: What the recording's summary file holds, empty for no file
+    :param live_description: What the video's description says now; by default
+        the metadata-only one this migration wrote at upload
+    :return: The decision, as :func:`republish.redescribe` returns it
+    """
+    profile = load_profile("example")
+    board = profile.board("sunday_sermon")
+    if summary:
+        write_text(summary_path(site_dir, "12"), summary)
+
+    video = Video(type="vimeo", id="999888777666", url="", embed_url="", title="설교 제목",
+                  bible_verse="요한복음 21:15", publish_date="2026-08-02", artist="홍길동 목사",
+                  genre="Sermon", language="kor")
+    if live_description is None:
+        live_description = format_upload_description(video, "", profile, board)
+
+    plan = [{"num": "12", "vimeo_id": "999888777666", "youtube_id": "aBcDeFgHiJk",
+             "title": "설교 제목", "published": "2026-08-02"}]
+    snippets = {"aBcDeFgHiJk": {"title": "설교 제목", "description": live_description}}
+    return republish.redescribe(plan, snippets, {"12": video}, site_dir, profile, board)
+
+
+def test_a_video_whose_summary_is_not_written_yet_is_skipped(tmp_path) -> None:
+    """
+    Today that is all hundred and thirty-five of them.
+
+    Pushing anyway would spend 50 quota units to write back the metadata-only
+    description the video already carries, on a pass that is quota-bound.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    (_row, _snippet, wanted, note) = described(tmp_path, "")[0]
+
+    assert note == "no summary written yet"
+    assert wanted == "", "nothing is built for a video that will not be sent"
+
+
+def test_a_summary_still_carrying_its_stub_marker_is_skipped_too(tmp_path) -> None:
+    """
+    The marker is the whole publishing rule, and both writers have to test it.
+
+    A stub holds the transcript. Sent, it would put tens of thousands of
+    characters into the description of a live sermon.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    stub = summarize("설교 본문 요한복음 하나 둘", "stub")
+    (_row, _snippet, wanted, note) = described(tmp_path, stub)[0]
+
+    assert note == "no summary written yet"
+    assert wanted == ""
+
+
+def test_a_written_summary_is_built_into_the_description_and_sent(tmp_path) -> None:
+    """
+    A summary somebody finished by hand is what this pass exists to publish.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    summary = "고친 설교 본문 요한복음 다섯"
+    (_row, _snippet, wanted, note) = described(tmp_path, summary + "\n")[0]
+
+    assert note == ""
+    assert wanted.startswith(summary)
+    # The verse and the preacher survive. Rebuilding a description without them
+    # would delete both from a video that is carrying them.
+    assert "본문: 요한복음 21:15" in wanted
+    assert "설교: 홍길동 목사" in wanted
+
+
+def test_a_video_that_already_says_it_is_not_sent_again(tmp_path) -> None:
+    """
+    Re-running the pass must be free. Each edit costs 50 of a daily 10,000.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    summary = "고친 설교 본문 요한복음 다섯"
+    built = described(tmp_path, summary + "\n")[0][2]
+    (_row, _snippet, _wanted, note) = described(tmp_path, summary + "\n", live_description=built)[0]
+
+    assert note == "already says this"
+
+
+def test_a_description_somebody_edited_by_hand_is_never_overwritten(tmp_path) -> None:
+    """
+    ``videos.update`` replaces the field whole, so pushing over an edit destroys it.
+
+    The check is exact — the live text must be what this profile renders for
+    this recording with no summary — which is also what stops a second pass
+    prepending a changed summary on top of the one already published.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    summary = "고친 설교 본문 요한복음 다섯"
+    (_row, _snippet, _wanted, note) = described(
+        tmp_path, summary + "\n", live_description="설교 제목\n\n본문: 요한복음 21:15")[0]
+
+    assert note == "the description is not the one this migration wrote"
+
+
+def test_a_recording_the_export_does_not_cover_is_left_alone(tmp_path) -> None:
+    """
+    Without the export there is no verse and no preacher, and a description
+    built without them would delete both.
+
+    :param tmp_path: Fixture supplying a directory
+    """
+    profile = load_profile("example")
+    write_text(summary_path(tmp_path, "12"), "고친 설교 본문 요한복음 다섯\n")
+    plan = [{"num": "12", "vimeo_id": "999888777666", "youtube_id": "aBcDeFgHiJk",
+             "title": "설교 제목", "published": "2026-08-02"}]
+    snippets = {"aBcDeFgHiJk": {"title": "설교 제목", "description": "본문: 요한복음 21:15"}}
+
+    decided = republish.redescribe(plan, snippets, {}, tmp_path, profile,
+                                   profile.board("sunday_sermon"))
+    assert decided[0][3] == "the export does not cover this recording"
+    assert decided[0][2] == ""

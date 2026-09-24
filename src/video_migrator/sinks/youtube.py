@@ -27,6 +27,7 @@ from oauth2client.tools import argparser as oauth_argparser
 from oauth2client.tools import run_flow
 
 from ..logs import configure
+from ..metadata.language import LANGUAGE_TAGS
 
 # Explicitly tell the underlying HTTP transport library not to retry, since
 # we are handling retry logic ourselves.
@@ -167,11 +168,6 @@ VALID_PRIVACY_STATUSES = ("public", "private", "unlisted")
 #: sermon is not children's content: declaring it so would strip comments, end
 #: screens and personalized recommendations from every recording.
 DEFAULT_MADE_FOR_KIDS = "no"
-
-#: ISO 639-2/B, as a scrape records it, to the BCP-47 tags YouTube wants.
-#: Titles here are Korean, and a video whose language is unstated is guessed at
-#: — which decides which audiences it is offered to.
-LANGUAGE_TAGS = {"kor": "ko", "eng": "en", "spa": "es", "chi": "zh", "jpn": "ja"}
 
 #: The only privacy status a scheduled publication is accepted from. A video
 #: given a publishAt while public or unlisted is rejected outright, since
@@ -333,6 +329,34 @@ def refreshed(credentials) -> bool:
     return True
 
 
+def consented(flow, storage, args: argparse.Namespace):
+    """
+    Consent, without letting the flow reset this run's logging.
+
+    ``oauth2client.tools.run_flow`` ends by setting the *root* logger to its own
+    ``--logging_level``, which defaults to ``ERROR``. Nothing here ever passes
+    that flag, so consenting part way through a migration silences every later
+    line of a run that then carries on working for hours: an upload's progress, a
+    transcription's, the warning when a video could not be confirmed. The run
+    reads as having hung moments after saying ``Authentication successful.``,
+    which is the one thing it has not done.
+
+    The level is restored rather than forced, so a run asked for ``--verbose``
+    keeps what it asked for.
+
+    :param flow: The consent flow to run
+    :param storage: Where the credentials it obtains are cached
+    :param args: Command-line arguments, carrying oauth2client's own flags
+    :return: The credentials consented to
+    """
+    root = logging.getLogger()
+    level = root.level
+    try:
+        return run_flow(flow, storage, args)
+    finally:
+        root.setLevel(level)
+
+
 def get_authenticated_service(args: argparse.Namespace) -> Resource:
     """
     Authenticate and build the YouTube service.
@@ -368,7 +392,7 @@ def get_authenticated_service(args: argparse.Namespace) -> Resource:
             credentials = None
 
     if credentials is None or credentials.invalid:
-        credentials = run_flow(flow, storage, args)
+        credentials = consented(flow, storage, args)
 
     return build(
         YOUTUBE_API_SERVICE_NAME,

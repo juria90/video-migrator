@@ -11,9 +11,28 @@ license-files = ["LICENSE"]
 # Must match the pin in .python-version.
 requires-python = ">=3.13,<3.14"
 dependencies = [
+    # For the api summarize backend (video_migrator.metadata.summarize).
+    "anthropic",
     "beautifulsoup4",
     "curl-cffi",
+    # Transcribing, for the summarize stage. A heavy install — it brings
+    # CTranslate2 and onnxruntime with it — but the stage is part of the
+    # pipeline rather than beside it, and a migration that cannot transcribe
+    # loses the sermon's words permanently at release. Imported inside the
+    # function that needs it, so that costs disk rather than start-up time.
+    "faster-whisper",
     "google-api-python-client",
+    # The CUDA runtime CTranslate2 opens by name. Not pulled in by
+    # faster-whisper, and without them transcription fails at *inference* with
+    # "Library libcublas.so.12 is not found" — after the model has loaded and
+    # the GPU has shown activity, which is a thoroughly misleading way to fail.
+    #
+    # About 1.1 GB, and Linux-only: a machine without them falls back to the CPU
+    # rather than failing (metadata.summarize._fall_back_to_cpu), but the CPU is
+    # roughly ten times slower on this material, and the GPU is the whole reason
+    # the stage fits inside time the pipeline is already spending.
+    "nvidia-cublas-cu12; sys_platform == 'linux'",
+    "nvidia-cudnn-cu12; sys_platform == 'linux'",
     "oauth2client",
     "pyyaml",
     "requests",
@@ -77,6 +96,18 @@ python_functions = ["test_*"]
 [tool.ruff]
 line-length = 120
 target-version = "py313"
+
+# Each directory under sites/ is one source site, cloned in as its own private
+# repository with its own tooling and its own history. Git does not descend into
+# a nested repository and tools/check_no_real_data.py cannot see inside one
+# either, so this is where every other check in this project already stops; ruff
+# crossing the boundary is the anomaly, not the rule.
+#
+# Left in, cloning a site makes that repository's code fail this one's lint —
+# failures nobody here can fix without committing to somebody else's repository.
+# A site lints itself, on its own terms. Anchored to the root, so an unrelated
+# sites/ elsewhere in the tree is unaffected — the same rule .gitignore states.
+extend-exclude = ["sites/*"]
 
 [tool.ruff.lint]
 select = [

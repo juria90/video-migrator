@@ -2,8 +2,8 @@
 """
 Carry recordings from the source archive to YouTube, one stage at a time.
 
-Each recording passes through five stages — fetch, measure, repair, upload,
-release — and each stamps the plan as it finishes. A run does as many as it is
+Each recording passes through six stages — fetch, measure, repair, summarize,
+upload, release — and each stamps the plan as it finishes. A run does as many as it is
 told to and stops; the next run reads the plan and continues from wherever the
 last one stopped, including part way through a single recording.
 
@@ -29,9 +29,11 @@ import csv
 import logging
 import os
 import pathlib
+import selectors
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 
@@ -44,6 +46,17 @@ from video_migrator.cli import selects  # noqa: E402
 from video_migrator.config import load_profile  # noqa: E402
 from video_migrator.logs import Ticker, configure  # noqa: E402
 from video_migrator.media.artifacts import repair_filter  # noqa: E402
+from video_migrator.metadata.summarize import (  # noqa: E402
+    BACKENDS,
+    DEFAULT_WHISPER_MODEL,
+    read_summary,
+    summarize,
+    summary_path,
+    transcribe_cached,
+    transcript_path,
+    write_text,
+)
+from video_migrator.metadata.upload_description import format_upload_description  # noqa: E402
 from video_migrator.metadata.upload_title import format_upload_title  # noqa: E402
 from video_migrator.models import Video  # noqa: E402
 from video_migrator.plan import (  # noqa: E402
@@ -72,6 +85,12 @@ MEASURE_SAMPLES = 16
 
 #: What a repaired file is called, beside the master it came from.
 REPAIRED_SUFFIX = ".repaired.mp4"
+
+#: Stamped into ``summarized_at`` for a recording this stage cannot act on: one
+#: released before the stage existed, or one waved past with
+#: ``--summarize-backend none``. A time would say the stage ran; this says it
+#: did not, and will not. Shared with ``tools/republish.py --mark-summarized``.
+NOT_SUMMARIZED = "n/a"
 
 #: How hard x264 works on a repaired recording.
 #:
@@ -115,8 +134,14 @@ DEFAULT_PRESET = "fast"
 #: and the overlap that is left — an encode running while the next recording
 #: downloads and the last one uploads — is free.
 #:
+#: Summarize wants the GPU, which neither of the others touches, so it gets a
+#: gate of its own: transcription can run beside an encode without either
+#: slowing the other, but two Whisper models will not fit on a 4 GiB card at
+#: once. On CPU it would contend with x264 instead — see ``--whisper-device``.
+#:
 #: Release touches neither: it deletes a file.
-CONTENDS_FOR = {"fetch": "network", "upload": "network", "measure": "cpu", "repair": "cpu"}
+CONTENDS_FOR = {"fetch": "network", "upload": "network", "measure": "cpu", "repair": "cpu",
+                "summarize": "asr"}
 
 #: What YouTube says when the account has published as many videos today as it
 #: is allowed to. This is a cap on videos per day and is not the API quota; it
@@ -140,6 +165,29 @@ DAILY_LIMIT = "uploadLimitExceeded"
 #: mean the same thing wherever the run was started from.
 ENCODING: set[subprocess.Popen] = set()
 ENCODING_LOCK = threading.Lock()
+
+#: How long an encode may say nothing before it is taken as wedged.
+#:
+#: ``-progress`` reports about once a second whatever the encode's throughput,
+#: so silence does not mean slow — it means stopped. An ffmpeg that wedges takes
+#: the whole run with it and not only the recording: the stage sits in a
+#: blocking read that never returns, so the thread never comes back, the pool
+#: never shuts down, and a run interrupted at the terminal cannot even exit.
+#: One did exactly that here, spinning on a single core for six hours having
+#: read nothing and written nothing since its second minute.
+#:
+#: Generous, because the cost of being wrong is asymmetric: an encode killed
+#: early is twenty minutes redone, and one never killed is the rest of the
+#: night. Nothing legitimate is quiet for ten minutes.
+ENCODE_STALL_SECONDS = 600.0
+
+#: How long a stopped encode is given to go before it is ended outright.
+#:
+#: ffmpeg catches SIGTERM rather than dying on it: the handler sets a flag that
+#: the transcode loop reads between iterations, so a wedged ffmpeg — the very
+#: one worth killing — never reads it. Asking politely first is still right, so
+#: that a healthy encode closes the file it is writing.
+ENCODE_GRACE_SECONDS = 10.0
 
 
 logger = logging.getLogger(__name__)
@@ -173,7 +221,11 @@ def wanted_from(board: pathlib.Path, preacher: list[str] | None,
             wanted.append({"num": row["num"], "ID": row["ID"],
                            "title": format_upload_title(video, profile, board_config),
                            "date": row["Publish Date"], "verse": row["Bible Verse"],
-                           "artist": row["Preacher"], "language": row["Language"]})
+                           "artist": row["Preacher"], "language": row["Language"],
+                           # Kept whole as well as in pieces: the description is
+                           # formatted from the same normalized record the title
+                           # was, rather than reassembled from the pieces.
+                           "video": video})
     return wanted
 
 
@@ -287,17 +339,69 @@ def stop_encoding() -> int:
     """
     End every encode now running.
 
-    Sent a terminate rather than a kill, so ffmpeg closes the file it is writing
-    before it goes. The part-file is discarded either way — an encode cannot be
-    resumed — but a half-flushed one is worth avoiding on principle.
+    Asked to stop rather than killed outright, so ffmpeg closes the file it is
+    writing before it goes. The part-file is discarded either way — an encode
+    cannot be resumed — but a half-flushed one is worth avoiding on principle.
+    One that does not take the hint is ended anyway; see :func:`end_encode`.
 
     :return: How many encodes were stopped
     """
     with ENCODING_LOCK:
         running = list(ENCODING)
     for process in running:
-        process.terminate()
+        end_encode(process)
     return len(running)
+
+
+def end_encode(process: subprocess.Popen, grace: float = ENCODE_GRACE_SECONDS) -> None:
+    """
+    Stop one encode, and make sure it is actually stopped.
+
+    :param process: The ffmpeg to end
+    :param grace: How long to wait for it to go of its own accord
+    :return: None
+    """
+    process.terminate()
+    try:
+        process.wait(timeout=grace)
+    except subprocess.TimeoutExpired:
+        logger.warning("ffmpeg %d did not stop when asked; ending it outright", process.pid)
+        process.kill()
+        process.wait()
+
+
+def encode_progress(stream, stall_seconds: float = ENCODE_STALL_SECONDS):
+    """
+    Read an encode's progress, and refuse to wait forever for the next line.
+
+    Read a line at a time, a wedged ffmpeg is indistinguishable from a slow one
+    and the read simply never returns. Waiting on the file descriptor instead
+    puts a limit on the silence, which is the only signal there is: see
+    :data:`ENCODE_STALL_SECONDS`.
+
+    :param stream: ffmpeg's ``-progress`` pipe, opened in binary
+    :param stall_seconds: How long silence may last before the encode is given up on
+    :return: Each progress line, newline stripped
+    :raises TimeoutError: If nothing arrives for ``stall_seconds``
+    """
+    selector = selectors.DefaultSelector()
+    selector.register(stream, selectors.EVENT_READ)
+    # Read straight from the descriptor. A buffered reader can be holding a
+    # whole line that the selector, which sees only the pipe, reports nothing
+    # for — and the stage would then time out with its answer already in hand.
+    rest = b""
+    try:
+        while True:
+            if not selector.select(stall_seconds):
+                raise TimeoutError(f"no progress for {stall_seconds:.0f}s")
+            chunk = os.read(stream.fileno(), 65536)
+            if not chunk:
+                break
+            *lines, rest = (rest + chunk).split(b"\n")
+            for line in lines:
+                yield line.decode("utf-8", "replace")
+    finally:
+        selector.close()
 
 
 def do_repair(row: dict[str, str], crf: int, preset: str = DEFAULT_PRESET) -> None:
@@ -314,6 +418,8 @@ def do_repair(row: dict[str, str], crf: int, preset: str = DEFAULT_PRESET) -> No
     :param preset: How hard x264 works; see :data:`DEFAULT_PRESET`
     :return: None
     :raises subprocess.CalledProcessError: If ffmpeg fails
+    :raises TimeoutError: If ffmpeg stops reporting progress; see
+        :data:`ENCODE_STALL_SECONDS`
     """
     if row["repair"] in ("", "none"):
         row["repaired_at"] = now()
@@ -327,36 +433,59 @@ def do_repair(row: dict[str, str], crf: int, preset: str = DEFAULT_PRESET) -> No
     # which is the only thing ffmpeg emits that is meant to be parsed. Without
     # it an encode of an hour-long sermon says nothing at all for twenty
     # minutes, and a stalled one looks exactly like a slow one.
-    process = subprocess.Popen(
-        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
-         "-y", "-i", str(master),
-         "-vf", row["repair"], "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
-         # Named rather than inferred: ffmpeg cannot guess a container from a
-         # name ending in ".part", and the part-file is what stops an
-         # interrupted encode leaving something that looks finished.
-         "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
-         "-f", "mp4", str(partial)],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-    with ENCODING_LOCK:
-        ENCODING.add(process)
-
-    ticker = Ticker()
-    for line in process.stdout:
-        key, _, value = line.strip().partition("=")
-        if key in ("out_time_us", "out_time_ms") and value.isdigit() and ticker.due():
-            # out_time_ms is misnamed and holds microseconds, as out_time_us does.
-            seconds = int(value) / 1_000_000
-            share = f" ({seconds / duration:.0%})" if duration else ""
-            logger.info("  encoded %d:%02d of %d:%02d%s",
-                        seconds // 60, seconds % 60, duration // 60, duration % 60, share)
-    try:
-        finished = process.wait()
-    finally:
+    # Errors go to a file rather than a pipe. A pipe nobody reads holds 64 KiB
+    # and then blocks whoever is writing it — and this reads ffmpeg's progress,
+    # never its errors, so a chatty encode (a run of corrupt frames is a line
+    # each) would wedge against a buffer it had filled itself.
+    with tempfile.TemporaryFile() as errors:
+        # ``-progress pipe:1`` reports position on stdout in a stable key=value
+        # form, which is the only thing ffmpeg emits that is meant to be parsed.
+        # Without it an encode of an hour-long sermon says nothing at all for
+        # twenty minutes, and a stalled one looks exactly like a slow one.
+        process = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostats", "-progress", "pipe:1",
+             # ffmpeg reads the keyboard unless told not to, and it shares a
+             # terminal with the run that started it. A keystroke meant for the
+             # shell goes to whichever of them reads it first, and ``q`` there
+             # ends an encode twenty minutes in for no reason that survives to
+             # the log.
+             "-nostdin",
+             "-y", "-i", str(master),
+             "-vf", row["repair"], "-c:v", "libx264", "-crf", str(crf), "-preset", preset,
+             # Named rather than inferred: ffmpeg cannot guess a container from a
+             # name ending in ".part", and the part-file is what stops an
+             # interrupted encode leaving something that looks finished.
+             "-pix_fmt", "yuv420p", "-c:a", "copy", "-movflags", "+faststart",
+             "-f", "mp4", str(partial)],
+            stdout=subprocess.PIPE, stderr=errors)
         with ENCODING_LOCK:
-            ENCODING.discard(process)
-    if finished != 0:
-        partial.unlink(missing_ok=True)
-        raise subprocess.CalledProcessError(process.returncode, "ffmpeg", stderr=process.stderr.read())
+            ENCODING.add(process)
+
+        ticker = Ticker()
+        try:
+            for line in encode_progress(process.stdout, ENCODE_STALL_SECONDS):
+                key, _, value = line.strip().partition("=")
+                if key in ("out_time_us", "out_time_ms") and value.isdigit() and ticker.due():
+                    # out_time_ms is misnamed and holds microseconds, as out_time_us does.
+                    seconds = int(value) / 1_000_000
+                    share = f" ({seconds / duration:.0%})" if duration else ""
+                    logger.info("  encoded %d:%02d of %d:%02d%s",
+                                seconds // 60, seconds % 60, duration // 60, duration % 60, share)
+            finished = process.wait()
+        except TimeoutError:
+            logger.warning("  num=%s the encode stopped reporting; ending it", row["num"])
+            end_encode(process)
+            partial.unlink(missing_ok=True)
+            raise
+        finally:
+            with ENCODING_LOCK:
+                ENCODING.discard(process)
+            process.stdout.close()
+        if finished != 0:
+            partial.unlink(missing_ok=True)
+            errors.seek(0)
+            raise subprocess.CalledProcessError(process.returncode, "ffmpeg",
+                                                stderr=errors.read().decode("utf-8", "replace"))
 
     partial.replace(repaired)
     # ``path`` keeps naming the master. Pointing it at the repaired file instead
@@ -364,6 +493,102 @@ def do_repair(row: dict[str, str], crf: int, preset: str = DEFAULT_PRESET) -> No
     # output that the stage had not produced yet — and, once that output had
     # been deleted, addressing nothing at all.
     row["repaired_at"] = now()
+
+
+def video_for(row: dict[str, str], source: dict) -> Video:
+    """
+    The normalized record a description is built from.
+
+    Usually the one :func:`wanted_from` already made while formatting the title.
+    A plan row outside the current selection — a different preacher, a narrowed
+    ``--preacher`` — has no export entry behind it, and is described from what
+    the plan itself remembers rather than being skipped.
+
+    :param row: The plan row being published
+    :param source: Its export entry, empty where the selection does not cover it
+    :return: The record to format a description from
+    """
+    if isinstance(source.get("video"), Video):
+        return source["video"]
+    return Video(type="vimeo", id=row["vimeo_id"], url="", embed_url="", title=row["title"],
+                 publish_date=row.get("published", ""), artist=source.get("artist", ""),
+                 bible_verse=source.get("verse", ""), language=source.get("language", ""))
+
+
+def file_to_send(row: dict[str, str]) -> pathlib.Path:
+    """
+    The file this recording is represented by: the repaired one, or the master.
+
+    Decided by what is on disk rather than by what the plan says, so that a
+    repair rerun after the plan was written is still picked up. Shared by
+    :func:`do_summarize` and :func:`do_upload` so that the words transcribed are
+    the words in the video published, rather than two different cuts of it.
+
+    :param row: A plan row that has been fetched
+    :return: The path to transcribe and to upload
+    """
+    master = pathlib.Path(row["path"])
+    repaired, _partial = repaired_paths(master)
+    return repaired if repaired.exists() else master
+
+
+def do_summarize(row: dict[str, str], source: dict, options: argparse.Namespace) -> None:
+    """
+    Transcribe the recording and write the summary that will go in its description.
+
+    The transcript is cached: a recording already transcribed is read from disk
+    and no model is loaded. That is what makes ``--redo-from summarize`` cheap
+    enough to use for a re-summarization, and it is also the only copy of the
+    sermon's words that survives ``release``.
+
+    :param row: The plan row to advance
+    :param source: The export entry it came from, supplying the language
+    :param options: Options carrying the site directory, backend and Whisper settings
+    :return: None
+    :raises ValueError: If transcription produces nothing
+    """
+    # A recording that finished before this stage existed. Adding the column put
+    # every such row back into the queue, and its master was deleted at release —
+    # so there is nothing to transcribe and never will be. Stamped rather than
+    # attempted, because the alternative is several hundred rows failing one
+    # after another and a run spending its --limit on them.
+    #
+    # ``tools/republish.py --mark-summarized`` does this to the whole plan in one
+    # pass and is still worth running first, so that the counts read correctly
+    # before a run starts. This is the same judgement made per row, so that
+    # forgetting costs nothing.
+    if (row.get("released_at") or "").strip():
+        logger.info(f"    num={row['num']} released before this stage existed; "
+                    f"nothing to transcribe — backfill it instead")
+        row["summarized_at"] = NOT_SUMMARIZED
+        return
+
+    if options.summarize_backend == "none":
+        # The escape hatch. Nothing is transcribed, so nothing survives the
+        # release that follows — said out loud because the alternative is
+        # discovering it a month later against a video that cannot be redone.
+        logger.info(f"    num={row['num']} not summarized; the transcript is forgone")
+        row["summarized_at"] = NOT_SUMMARIZED
+        return
+
+    transcript_file = transcript_path(options.site_dir, row["num"], row["vimeo_id"])
+    transcript, transcribed = transcribe_cached(
+        file_to_send(row), transcript_file, source.get("language", ""),
+        options.whisper_model, options.whisper_device, options.retranscribe)
+    logger.info(f"    num={row['num']} {len(transcript)} characters "
+                f"{'transcribed' if transcribed else 'already on disk'}")
+
+    # Rewritten while it is still a stub, so that coming back with a different
+    # backend produces a different summary — which is the whole point of
+    # --redo-from summarize. Never once somebody has deleted the marker: a
+    # summary written by hand is the one artifact of this stage that cost a
+    # person anything, and regenerating over it would destroy it silently.
+    summary_file = summary_path(options.site_dir, row["num"])
+    if not read_summary(summary_file):
+        write_text(summary_file, summarize(transcript, options.summarize_backend))
+    else:
+        logger.info(f"    num={row['num']} keeping the summary already written")
+    row["summarized_at"] = now()
 
 
 def do_upload(row: dict[str, str], source: dict, options: argparse.Namespace) -> None:
@@ -374,16 +599,16 @@ def do_upload(row: dict[str, str], source: dict, options: argparse.Namespace) ->
     :param source: The export entry it came from, for the description
     :param options: Options carrying channel, privacy and category
     :return: None
-    :raises ValueError: If the upload is refused
+    :raises ValueError: If the upload is refused, or the description is too long
     """
-    description = "\n".join(part for part in (
-        source.get("verse", ""), source.get("artist", ""), source.get("date", "")) if part)
-    # The repaired file where the recording needed repairing, the master where it
-    # did not — decided by what is on disk rather than by what the plan says, so
-    # that a repair rerun after the plan was written is still picked up.
-    master = pathlib.Path(row["path"])
-    repaired, _partial = repaired_paths(master)
-    sending = repaired if repaired.exists() else master
+    # Empty where no summary has been written, and empty for one still carrying
+    # the stub marker — both mean the {summary} slot renders away and the
+    # description is the metadata alone, which is what was published before this
+    # stage existed. Publishing a stub would put a whole transcript here.
+    summary = read_summary(summary_path(options.site_dir, row["num"]))
+    description = format_upload_description(video_for(row, source), summary,
+                                            options.profile_loaded, options.board_loaded)
+    sending = file_to_send(row)
 
     argv = upload_arguments(
         file=str(sending), title=row["title"], description=description,
@@ -502,6 +727,8 @@ def advance(row: dict[str, str], source: dict, args: argparse.Namespace, api: Vi
                 elif stage == "repair":
                     (do_repair(row, args.crf, args.preset) if not args.no_repair
                      else row.update(repaired_at=now()))
+                elif stage == "summarize":
+                    do_summarize(row, source, args)
                 elif stage == "upload":
                     do_upload(row, source, args)
                     logger.info(f"    num={row['num']} https://youtu.be/{row['youtube_id']}")
@@ -588,6 +815,21 @@ def main() -> int:
                              "takes most of the machine, so raise this only alongside an encoder "
                              "that does not")
     parser.add_argument("--no-repair", action="store_true", help="Measure, but upload the master either way")
+    parser.add_argument("--site-dir", type=pathlib.Path,
+                        help="Where transcripts and summaries are kept (default: the directory above "
+                             "--board, so a board under sites/<site>/data/ keeps them in sites/<site>/)")
+    parser.add_argument("--summarize-backend", default="stub", choices=BACKENDS,
+                        help="How the summary is produced: 'stub' writes the transcript into the "
+                             "summary file for somebody to finish by hand, 'api' and 'local' are not "
+                             "written yet, and 'none' skips the stage — forgoing the transcript, "
+                             "which release then makes unrecoverable (default: stub)")
+    parser.add_argument("--whisper-model", default=DEFAULT_WHISPER_MODEL,
+                        help=f"Which Whisper model transcribes (default: {DEFAULT_WHISPER_MODEL})")
+    parser.add_argument("--whisper-device", default="auto", choices=("auto", "cuda", "cpu"),
+                        help="Where it runs (default: auto)")
+    parser.add_argument("--retranscribe", action="store_true",
+                        help="Transcribe again even where a transcript is already on disk. Without "
+                             "this the cached one is read and no model is loaded")
     parser.add_argument("--keep", action="store_true", help="Do not delete masters after uploading")
     parser.add_argument("--no-confirm", action="store_true",
                         help="Do not wait to see whether YouTube refuses each upload. Quicker, and "
@@ -595,17 +837,23 @@ def main() -> int:
     parser.add_argument("--cached-first", action="store_true",
                         help="Take recordings whose master is already in --work-dir before the rest. "
                              "A survey leaves gigabytes there that the plan does not know about")
-    parser.add_argument("--stop-before", choices=("measure", "repair", "upload", "release"),
+    parser.add_argument("--stop-before", choices=("measure", "repair", "summarize", "upload", "release"),
                         help="Advance each recording only as far as this stage")
     parser.add_argument("--redo", action="append", metavar="NUM", default=[],
                         help="Send this recording back to --redo-from and do it again. Repeatable")
     parser.add_argument("--redo-from", default="upload",
-                        choices=("fetch", "measure", "repair", "upload", "release"),
+                        choices=("fetch", "measure", "repair", "summarize", "upload", "release"),
                         help="Which stage --redo goes back to (default: upload)")
     args = parser.parse_args()
     configure()
 
     plan_path = args.plan or args.board.parent / "migration-plan.tsv"
+    # A board lives in sites/<site>/data/, so its grandparent is the site
+    # directory the transcripts belong beside. Resolved once here rather than
+    # per stage, so that --site-dir means the same thing everywhere.
+    args.site_dir = args.site_dir or args.board.parent.parent
+    args.profile_loaded = load_profile(args.profile)
+    args.board_loaded = args.profile_loaded.board(args.board_name)
     wanted = wanted_from(args.board, args.preacher, args.profile, args.board_name)
     by_num = {entry["num"]: entry for entry in wanted}
 
