@@ -2,6 +2,7 @@
 """Tests for the resource the YouTube sink sends to videos.insert, and the channel guard."""
 
 import argparse
+import logging
 
 import pytest
 from googleapiclient.errors import HttpError
@@ -15,6 +16,7 @@ from video_migrator.sinks.youtube import (
     as_recording_timestamp,
     build_body,
     confirm_upload,
+    consented,
     create_argument_parser,
     expected_channel,
     resumable_http,
@@ -536,3 +538,30 @@ def test_a_finished_upload_forgets_its_session(tmp_path) -> None:
 
     assert resumable_upload(FinishingRequest(), session) == "aBcDeFgHiJk"
     assert not session.exists()
+
+
+def test_consenting_leaves_the_run_saying_what_it_is_doing(monkeypatch) -> None:
+    """
+    oauth2client sets the root logger to its own default of ERROR as it finishes.
+
+    A run that consents part way through would otherwise go silent for the rest
+    of its hours, which reads as a hang rather than as a run still working.
+
+    :param monkeypatch: Fixture supplying a stand-in for the consent flow
+    """
+    def flow_that_lowers_the_level(_flow, _storage, _args):
+        """
+        :return: Credentials, having reset the root logger as oauth2client does
+        """
+        logging.getLogger().setLevel(logging.ERROR)
+        return "credentials"
+
+    monkeypatch.setattr(youtube_module, "run_flow", flow_that_lowers_the_level)
+    root = logging.getLogger()
+    before = root.level
+    root.setLevel(logging.INFO)
+    try:
+        assert consented(None, None, argparse.Namespace()) == "credentials"
+        assert root.level == logging.INFO
+    finally:
+        root.setLevel(before)

@@ -21,10 +21,13 @@ import httplib2
 from googleapiclient.discovery import Resource, build
 from googleapiclient.errors import HttpError
 from googleapiclient.http import HttpRequest, MediaFileUpload
-from oauth2client.client import flow_from_clientsecrets
+from oauth2client.client import HttpAccessTokenRefreshError, flow_from_clientsecrets
 from oauth2client.file import Storage
 from oauth2client.tools import argparser as oauth_argparser
 from oauth2client.tools import run_flow
+
+from ..logs import configure
+from ..metadata.language import LANGUAGE_TAGS
 
 # Explicitly tell the underlying HTTP transport library not to retry, since
 # we are handling retry logic ourselves.
@@ -107,7 +110,12 @@ YOUTUBE_UPLOAD_SCOPE = "https://www.googleapis.com/auth/youtube.upload"
 # check where it is about to put several hundred videos.
 YOUTUBE_READONLY_SCOPE = "https://www.googleapis.com/auth/youtube.readonly"
 
-YOUTUBE_SCOPES = (YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE)
+# Editing a video that is already published — which is how a title format
+# settled on after the fact reaches the back catalogue — is neither an upload
+# nor a read, and neither scope above permits it.
+YOUTUBE_MANAGE_SCOPE = "https://www.googleapis.com/auth/youtube"
+
+YOUTUBE_SCOPES = (YOUTUBE_UPLOAD_SCOPE, YOUTUBE_READONLY_SCOPE, YOUTUBE_MANAGE_SCOPE)
 
 YOUTUBE_API_SERVICE_NAME = "youtube"
 YOUTUBE_API_VERSION = "v3"
@@ -160,11 +168,6 @@ VALID_PRIVACY_STATUSES = ("public", "private", "unlisted")
 #: sermon is not children's content: declaring it so would strip comments, end
 #: screens and personalized recommendations from every recording.
 DEFAULT_MADE_FOR_KIDS = "no"
-
-#: ISO 639-2/B, as a scrape records it, to the BCP-47 tags YouTube wants.
-#: Titles here are Korean, and a video whose language is unstated is guessed at
-#: — which decides which audiences it is offered to.
-LANGUAGE_TAGS = {"kor": "ko", "eng": "en", "spa": "es", "chi": "zh", "jpn": "ja"}
 
 #: The only privacy status a scheduled publication is accepted from. A video
 #: given a publishAt while public or unlisted is rejected outright, since
@@ -287,6 +290,11 @@ def existing_credentials(channel: str = "") -> str:
     ) if os.path.isdir(directory) else []
 
     if len(found) == 1:
+        # Worth saying out loud. The token decides which channel is published
+        # to, and this branch is reached precisely when nobody said which — so
+        # a token left behind for another channel is otherwise picked up in
+        # silence, and the first sign of it is a video on the wrong channel.
+        logger.info(f"no channel was named and {named} does not exist; using the one token there is, {found[0]}")
         return found[0]
     if len(found) > 1:
         raise SystemExit(
@@ -295,6 +303,58 @@ def existing_credentials(channel: str = "") -> str:
             + f"\nName one with --channel or ${CHANNEL_ENV_VAR}, so that this uploads where you mean it to."
         )
     return named
+
+
+def refreshed(credentials) -> bool:
+    """
+    Try to put a stale access token back in date, and say whether it worked.
+
+    A refresh token that has been revoked, or has gone unused long enough to
+    expire, loads exactly like a working one: ``invalid`` is False, because
+    nothing has asked Google about it yet. The refusal arrives at the first real
+    request instead, as an exception from inside the transport — which is how a
+    credential that simply needs consenting again comes to look like a failure
+    of whatever the run was doing at the time.
+
+    Asking here turns that into a question with an answer.
+
+    :param credentials: The credentials to refresh, updated in place on success
+    :return: Whether the token can still be refreshed
+    """
+    try:
+        credentials.refresh(resumable_http())
+    except HttpAccessTokenRefreshError as exc:
+        logger.info(f"the cached token can no longer be refreshed ({exc}); consenting again")
+        return False
+    return True
+
+
+def consented(flow, storage, args: argparse.Namespace):
+    """
+    Consent, without letting the flow reset this run's logging.
+
+    ``oauth2client.tools.run_flow`` ends by setting the *root* logger to its own
+    ``--logging_level``, which defaults to ``ERROR``. Nothing here ever passes
+    that flag, so consenting part way through a migration silences every later
+    line of a run that then carries on working for hours: an upload's progress, a
+    transcription's, the warning when a video could not be confirmed. The run
+    reads as having hung moments after saying ``Authentication successful.``,
+    which is the one thing it has not done.
+
+    The level is restored rather than forced, so a run asked for ``--verbose``
+    keeps what it asked for.
+
+    :param flow: The consent flow to run
+    :param storage: Where the credentials it obtains are cached
+    :param args: Command-line arguments, carrying oauth2client's own flags
+    :return: The credentials consented to
+    """
+    root = logging.getLogger()
+    level = root.level
+    try:
+        return run_flow(flow, storage, args)
+    finally:
+        root.setLevel(level)
 
 
 def get_authenticated_service(args: argparse.Namespace) -> Resource:
@@ -318,8 +378,21 @@ def get_authenticated_service(args: argparse.Namespace) -> Resource:
     storage = Storage(existing_credentials(expected_channel(args)))
     credentials = storage.get()
 
+    if credentials is not None and not credentials.invalid:
+        # Two ways a token that loads cleanly is still no use, neither of which
+        # sets ``invalid``. Both used to surface as a traceback from the first
+        # request, several stages into a run, reading like a fault in the
+        # request rather than in the credential behind it.
+        missing = set(YOUTUBE_SCOPES) - set(credentials.scopes or ())
+        if missing:
+            logger.info(f"the cached token was granted before {', '.join(sorted(missing))} "
+                        f"was asked for, so it cannot do everything this run needs; consenting again")
+            credentials = None
+        elif credentials.access_token_expired and not refreshed(credentials):
+            credentials = None
+
     if credentials is None or credentials.invalid:
-        credentials = run_flow(flow, storage, args)
+        credentials = consented(flow, storage, args)
 
     return build(
         YOUTUBE_API_SERVICE_NAME,
@@ -739,6 +812,90 @@ def confirm_upload(youtube: Resource, video_id: str, attempts: int = CONFIRM_ATT
     return upload_status, ""
 
 
+#: The snippet fields ``videos.update`` writes, and therefore the ones an edit
+#: has to send back even when it is not changing them.
+#:
+#: An update replaces the whole part it names: a writable field left out of the
+#: body is not left alone, it is *cleared*. So a pass that only rewrites a title
+#: still has to return the description, tags, category and language it read, or
+#: it publishes the new title over an emptied snippet.
+#:
+#: ``defaultAudioLanguage`` belongs here even though the API reference does not
+#: list it among the properties an update writes. It is cleared like the rest
+#: when left out, and YouTube then guesses the language afresh from the audio —
+#: which on a Korean sermon it got wrong, marking it ``en-US`` and changing
+#: which captions and translations the video is offered with. Found the only way
+#: it could be: by reading a video back after editing it.
+WRITABLE_SNIPPET_FIELDS = (
+    "title", "description", "tags", "categoryId", "defaultLanguage", "defaultAudioLanguage",
+)
+
+#: How many videos one ``videos.list`` may be asked about. Reading the snippets
+#: back costs one quota unit per call rather than per video, so a back-catalogue
+#: pass reads several hundred for the price of a handful.
+SNIPPET_BATCH = 50
+
+
+def writable_snippet(snippet: dict) -> dict:
+    """
+    Take the part of a snippet that can be sent back, and drop the rest.
+
+    A snippet read from the API also carries fields nobody may write —
+    ``publishedAt``, ``channelId``, ``thumbnails`` — which are ignored on the
+    way back in. The fields that matter are the writable ones, because those
+    are the ones an update clears if they are missing. See
+    :data:`WRITABLE_SNIPPET_FIELDS`.
+
+    :param snippet: A snippet as ``videos.list`` returned it
+    :return: Only the writable fields it actually had
+
+    >>> writable_snippet({"title": "제목", "channelId": "UC1", "categoryId": "29"})
+    {'title': '제목', 'categoryId': '29'}
+    >>> writable_snippet({"title": "제목", "defaultAudioLanguage": "ko"})
+    {'title': '제목', 'defaultAudioLanguage': 'ko'}
+    """
+    return {field: snippet[field] for field in WRITABLE_SNIPPET_FIELDS if field in snippet}
+
+
+def fetch_snippets(youtube: Resource, video_ids: list[str]) -> dict[str, dict]:
+    """
+    Read back what a set of videos currently say.
+
+    :param youtube: Authenticated YouTube service object
+    :param video_ids: The videos to ask about, in any number
+    :return: Video id -> its snippet, omitting any id YouTube does not know
+    """
+    snippets: dict[str, dict] = {}
+    for start in range(0, len(video_ids), SNIPPET_BATCH):
+        batch = video_ids[start:start + SNIPPET_BATCH]
+        response = youtube.videos().list(part="snippet", id=",".join(batch), maxResults=SNIPPET_BATCH).execute()
+        for item in response.get("items") or []:
+            snippets[item["id"]] = item["snippet"]
+    return snippets
+
+
+def update_snippet(youtube: Resource, video_id: str, snippet: dict) -> None:
+    """
+    Publish an edited snippet over the one a video carries.
+
+    :param youtube: Authenticated YouTube service object
+    :param video_id: The video to edit
+    :param snippet: The complete writable snippet, as
+        :func:`writable_snippet` returns it with the edits applied
+    :return: None
+    :raises ValueError: If the title is longer than YouTube accepts, which it
+        would refuse with a message naming neither the video nor the field
+    :raises googleapiclient.errors.HttpError: If YouTube refuses the edit
+    """
+    title = snippet.get("title", "")
+    if len(title) > MAX_TITLE_LENGTH:
+        raise ValueError(
+            f"{video_id}: a title of {len(title)} characters is longer than the {MAX_TITLE_LENGTH} "
+            f"YouTube accepts: {title!r}"
+        )
+    youtube.videos().update(part="snippet", body={"id": video_id, "snippet": snippet}).execute()
+
+
 def upload_arguments(file: str, title: str, description: str = "", privacy: str = "private",
                      category: int = 22, recording_date: str = "", channel: str = "",
                      session_file: str = "", made_for_kids: str = DEFAULT_MADE_FOR_KIDS,
@@ -826,6 +983,10 @@ def main() -> None:
     """
     parser = create_argument_parser()
     args = parser.parse_args()
+    # Everything this module says, it says through the logger. Without a
+    # configured handler the command runs, succeeds, and prints nothing — which
+    # is worst for --verify-only, whose entire output is the report.
+    configure()
 
     if not args.verify_only and not (args.file and os.path.exists(args.file)):
         sys.exit("Please specify a valid file using the --file= parameter, or pass --verify-only.")

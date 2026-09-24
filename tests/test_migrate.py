@@ -29,6 +29,8 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "tools")
 
 import migrate  # noqa: E402
 
+from video_migrator.config import load_profile  # noqa: E402
+from video_migrator.metadata.summarize import STUB_MARKER  # noqa: E402
 from video_migrator.plan import STAGES, read_plan, stage_of  # noqa: E402
 
 
@@ -43,6 +45,24 @@ def measurement(monkeypatch):
     monkeypatch.setattr(migrate, "probe", lambda *_a, **_k: (600.0, 30.0, (1280, 720)))
     monkeypatch.setattr(migrate, "motion_offsets", lambda *_a, **_k: [1.0, 2.0])
     monkeypatch.setattr(migrate, "measure_comb", lambda *_a, **_k: (4.0, 0.5, 2.0))
+
+
+@pytest.fixture
+def transcription(monkeypatch):
+    """
+    Replace transcribing, which otherwise loads a Whisper model onto the GPU.
+
+    Patched at the same seam the stage uses, so the caching, the summary file
+    and the description all still run for real — only the model is absent.
+
+    :param monkeypatch: Fixture for replacing the driver's own references
+    :return: None
+    """
+    def fake(_media, destination, *_a, **_k):
+        migrate.write_text(destination, "설교 본문 요한복음 하나 둘")
+        return "설교 본문 요한복음 하나 둘", True
+
+    monkeypatch.setattr(migrate, "transcribe_cached", fake)
 
 
 @pytest.fixture
@@ -111,6 +131,17 @@ def test_nothing_to_repair_means_no_encode_at_all(work) -> None:
     assert not list(work.glob("*.repaired.*"))
 
 
+def spent_pipe():
+    """
+    A stdout an encode can be watched through that reports nothing and ends.
+
+    :return: A readable stream already at end of file
+    """
+    read, write = os.pipe()
+    os.close(write)
+    return os.fdopen(read, "rb")
+
+
 def test_a_failed_encode_leaves_nothing_that_looks_finished(work, monkeypatch) -> None:
     """
     A part-file that survived a failure would be uploaded as though it were whole.
@@ -123,8 +154,7 @@ def test_a_failed_encode_leaves_nothing_that_looks_finished(work, monkeypatch) -
     class FailingProcess:
         """An ffmpeg that writes something and then fails."""
 
-        stdout = iter([])
-        stderr = types.SimpleNamespace(read=lambda: "ffmpeg said no")
+        stdout = spent_pipe()
         returncode = 1
 
         def wait(self):
@@ -227,7 +257,7 @@ def test_a_preacher_pattern_narrows_what_the_driver_will_carry(board) -> None:
     assert [e["num"] for e in migrate.wanted_from(board, ["홍길동*"], "example", "sunday_sermon")] == ["12"]
 
 
-def test_a_run_carrying_two_recordings_completes_both(board, tmp_path, monkeypatch) -> None:
+def test_a_run_carrying_two_recordings_completes_both(board, tmp_path, monkeypatch, transcription) -> None:
     """
     Two bugs have hidden here, and both appeared only on the *second* recording.
 
@@ -238,6 +268,7 @@ def test_a_run_carrying_two_recordings_completes_both(board, tmp_path, monkeypat
     :param board: Fixture supplying an export
     :param tmp_path: Fixture supplying a directory
     :param monkeypatch: Fixture for replacing everything outside the process
+    :param transcription: Fixture standing in for Whisper
     """
     work = tmp_path / "work"
     work.mkdir()
@@ -260,6 +291,7 @@ def test_a_run_carrying_two_recordings_completes_both(board, tmp_path, monkeypat
     monkeypatch.setattr(migrate, "repair_filter", lambda *_a, **_k: None)
     monkeypatch.setattr(sys, "argv", [
         "migrate.py", "--board", str(board), "--profile", "example",
+        "--site-dir", str(tmp_path / "site"),
         "--work-dir", str(work), "--limit", "2", "--plan", str(tmp_path / "plan.tsv")])
 
     assert migrate.main() == 0
@@ -273,7 +305,8 @@ def test_a_run_carrying_two_recordings_completes_both(board, tmp_path, monkeypat
     assert not list(work.glob("*.mp4"))
 
 
-def test_a_stage_that_fails_leaves_the_recording_outstanding(board, tmp_path, monkeypatch) -> None:
+def test_a_stage_that_fails_leaves_the_recording_outstanding(board, tmp_path, monkeypatch,
+                                                              transcription) -> None:
     """
     A failure must record why and stop, not stamp a success and move on.
 
@@ -283,6 +316,7 @@ def test_a_stage_that_fails_leaves_the_recording_outstanding(board, tmp_path, mo
     :param board: Fixture supplying an export
     :param tmp_path: Fixture supplying a directory
     :param monkeypatch: Fixture for replacing everything outside the process
+    :param transcription: Fixture standing in for Whisper
     """
     work = tmp_path / "work"
     work.mkdir()
@@ -298,6 +332,7 @@ def test_a_stage_that_fails_leaves_the_recording_outstanding(board, tmp_path, mo
     monkeypatch.setattr(migrate, "repair_filter", lambda *_a, **_k: None)
     monkeypatch.setattr(sys, "argv", [
         "migrate.py", "--board", str(board), "--profile", "example",
+        "--site-dir", str(tmp_path / "site"),
         "--work-dir", str(work), "--limit", "1", "--plan", str(tmp_path / "plan.tsv")])
 
     assert migrate.main() == 1
@@ -309,7 +344,8 @@ def test_a_stage_that_fails_leaves_the_recording_outstanding(board, tmp_path, mo
     assert (work / "12-345.mp4").exists()
 
 
-def test_an_upload_that_cannot_be_confirmed_is_still_an_upload(board, tmp_path, monkeypatch) -> None:
+def test_an_upload_that_cannot_be_confirmed_is_still_an_upload(board, tmp_path, monkeypatch,
+                                                               transcription) -> None:
     """
     Failing to *ask* what became of a video is not the video failing.
 
@@ -321,6 +357,7 @@ def test_an_upload_that_cannot_be_confirmed_is_still_an_upload(board, tmp_path, 
     :param board: Fixture supplying an export
     :param tmp_path: Fixture supplying a directory
     :param monkeypatch: Fixture for replacing everything outside the process
+    :param transcription: Fixture standing in for Whisper
     """
     work = tmp_path / "work"
     work.mkdir()
@@ -337,6 +374,7 @@ def test_an_upload_that_cannot_be_confirmed_is_still_an_upload(board, tmp_path, 
     monkeypatch.setattr(migrate, "repair_filter", lambda *_a, **_k: None)
     monkeypatch.setattr(sys, "argv", [
         "migrate.py", "--board", str(board), "--profile", "example",
+        "--site-dir", str(tmp_path / "site"),
         "--work-dir", str(work), "--limit", "1", "--plan", str(tmp_path / "plan.tsv")])
 
     assert migrate.main() == 0
@@ -379,8 +417,11 @@ def test_the_repaired_file_is_what_gets_uploaded_when_there_is_one(work, monkeyp
     monkeypatch.setattr(migrate, "upload", lambda options: sent.append(options.file) or "aBcDeFgHiJk")
     monkeypatch.setattr(migrate, "confirm_upload", lambda *_a, **_k: ("processed", ""))
     monkeypatch.setattr(migrate, "get_authenticated_service", lambda _options: None)
+    profile = load_profile("example")
     options = types.SimpleNamespace(privacy="unlisted", category=29, channel="", language="",
-                                    made_for_kids="no", embeddable="yes", no_confirm=False)
+                                    made_for_kids="no", embeddable="yes", no_confirm=False,
+                                    site_dir=work, profile_loaded=profile,
+                                    board_loaded=profile.board("sunday_sermon"))
 
     row = planned(path=str(work / "12-345.mp4"))
     migrate.do_upload(row, {}, options)
@@ -496,6 +537,7 @@ def traced(monkeypatch):
     monkeypatch.setattr(migrate, "do_measure", stage(
         "measure", 0.02, measured_at=stamp, period="", prominence="", repair="none"))
     monkeypatch.setattr(migrate, "do_repair", stage("repair", 0.20, repaired_at=stamp))
+    monkeypatch.setattr(migrate, "do_summarize", stage("summarize", 0.05, summarized_at=stamp))
     monkeypatch.setattr(migrate, "do_upload", stage(
         "upload", 0.05, uploaded_at=stamp, youtube_id=lambda row: f"video{row['num']}"))
     monkeypatch.setattr(migrate, "do_release", stage("release", 0.0, released_at=stamp))
@@ -515,6 +557,7 @@ def run_driver(board: pathlib.Path, tmp_path: pathlib.Path, monkeypatch, *extra:
     plan_path = tmp_path / "plan.tsv"
     monkeypatch.setattr(sys, "argv", [
         "migrate.py", "--board", str(board), "--profile", "example",
+        "--site-dir", str(tmp_path / "site"),
         "--work-dir", str(tmp_path / "work"), "--plan", str(plan_path), *extra])
     migrate.main()
     return plan_path
@@ -714,7 +757,7 @@ def test_a_termination_signal_stops_the_run_without_killing_a_stage(busy_board, 
     assert plan["10"]["repaired_at"], "the stage in progress should have finished"
     # It stops after that stage rather than carrying the recording to the end:
     # every stage boundary is resumable, so there is nothing to gain by going on.
-    assert stage_of(plan["10"]) == "upload"
+    assert stage_of(plan["10"]) == "summarize"
     # And the recordings behind it were not worked through.
     assert [stage_of(plan[num]) for num in ("12", "13")] != ["done", "done"]
 
@@ -751,8 +794,7 @@ def test_an_encode_that_finishes_is_no_longer_stoppable(work, monkeypatch) -> No
     class QuietProcess:
         """An ffmpeg that says nothing and succeeds."""
 
-        stdout = iter([])
-        stderr = types.SimpleNamespace(read=lambda: "")
+        stdout = spent_pipe()
         returncode = 0
 
         def wait(self):
@@ -780,8 +822,7 @@ def test_an_encode_that_fails_is_no_longer_stoppable(work, monkeypatch) -> None:
     class FailingProcess:
         """An ffmpeg that fails."""
 
-        stdout = iter([])
-        stderr = types.SimpleNamespace(read=lambda: "ffmpeg said no")
+        stdout = spent_pipe()
         returncode = 1
 
         def wait(self):
@@ -993,3 +1034,162 @@ def test_only_the_upload_limit_ends_a_run(message, expected) -> None:
     :param expected: Whether it should end the run
     """
     assert migrate.is_daily_limit(RuntimeError(message)) is expected
+
+
+def test_a_run_transcribes_once_and_publishes_what_the_summary_says(board, tmp_path,
+                                                                    monkeypatch) -> None:
+    """
+    The whole stage, end to end: transcribe, cache, stub, describe.
+
+    Every piece of this is cheap to get subtly wrong in a way no unit test sees —
+    a transcript written somewhere the next run does not look, a stub published
+    into a description, a second run paying for a model it did not need.
+
+    :param board: Fixture supplying an export
+    :param tmp_path: Fixture supplying a directory
+    :param monkeypatch: Fixture for replacing everything outside the process
+    """
+    site = tmp_path / "site"
+    sent = []
+    ran = []
+
+    monkeypatch.setattr(migrate.VimeoAPI, "__init__", lambda self, _token: None)
+    monkeypatch.setattr(migrate.VimeoAPI, "download",
+                        lambda _self, video_id, destination: destination.write_bytes(b"master"))
+    monkeypatch.setattr(migrate, "load_token", lambda *_a, **_k: "a token")
+    monkeypatch.setattr(migrate, "upload",
+                        lambda options: sent.append(options.description) or f"video{len(sent)}")
+    monkeypatch.setattr(migrate, "confirm_upload", lambda *_a, **_k: ("processed", ""))
+    monkeypatch.setattr(migrate, "get_authenticated_service", lambda _options: None)
+    monkeypatch.setattr(migrate, "repair_filter", lambda *_a, **_k: None)
+
+    import video_migrator.metadata.summarize as summarize_module
+    monkeypatch.setattr(summarize_module, "transcribe",
+                        lambda *_a, **_k: ran.append(1) or "설교 본문 요한복음 하나 둘")
+
+    def run(*extra: str) -> None:
+        monkeypatch.setattr(sys, "argv", [
+            "migrate.py", "--board", str(board), "--profile", "example",
+            "--site-dir", str(site), "--keep",
+            "--work-dir", str(tmp_path / "work"), "--limit", "1",
+            "--plan", str(tmp_path / "plan.tsv"), *extra])
+        assert migrate.main() == 0
+
+    run()
+
+    transcript = site / "transcript" / "12-345.txt"
+    assert transcript.read_text(encoding="utf-8") == "설교 본문 요한복음 하나 둘"
+    assert len(ran) == 1
+
+    # The stub is on disk, so the description published is the metadata alone —
+    # exactly what this project published before the stage existed.
+    assert STUB_MARKER in (site / "summaries" / "12.md").read_text(encoding="utf-8")
+    assert "설교 본문 요한복음" not in sent[0], "a stub must never reach a description"
+    assert sent[0].startswith("본문:")
+
+    # Somebody writes the summary and deletes the marker; the row goes back to
+    # the stage, which reads the transcript rather than loading a model again.
+    (site / "summaries" / "12.md").write_text("고친 설교 본문 요한복음 다섯\\n", encoding="utf-8")
+    run("--redo", "12", "--redo-from", "summarize")
+
+    assert len(ran) == 1, "the cached transcript must be read, not produced again"
+    assert sent[1].startswith("고친 설교 본문 요한복음 다섯")
+    assert "본문: 요한복음 3:16" in sent[1]
+
+
+def test_a_recording_released_before_the_stage_existed_is_not_transcribed(work) -> None:
+    """
+    Adding the column put every finished row back into the queue.
+
+    Their masters were deleted at release, so there is nothing to transcribe and
+    never will be — and attempting it sends several hundred rows through the
+    same failure one after another, spending a run's --limit on nothing. This
+    was met for real on the first run of the stage.
+
+    :param work: Fixture supplying a directory holding one master
+    """
+    options = types.SimpleNamespace(summarize_backend="stub", site_dir=work,
+                                    whisper_model="tiny", whisper_device="cpu", retranscribe=False)
+    row = planned(path=str(work / "gone.mp4"), released_at="2026-08-01 10:00",
+                  youtube_id="aBcDeFgHiJk")
+
+    migrate.do_summarize(row, {}, options)
+
+    assert row["summarized_at"] == migrate.NOT_SUMMARIZED
+    assert not (work / "transcript").exists(), "no model may be loaded for a released recording"
+
+
+def test_the_escape_hatch_says_the_stage_did_not_run(work) -> None:
+    """
+    ``--summarize-backend none`` forgoes the transcript, so it must not stamp a
+    time — which would claim a transcript exists somewhere.
+
+    :param work: Fixture supplying a directory holding one master
+    """
+    options = types.SimpleNamespace(summarize_backend="none", site_dir=work,
+                                    whisper_model="tiny", whisper_device="cpu", retranscribe=False)
+    row = planned(path=str(work / "12-345.mp4"))
+
+    migrate.do_summarize(row, {}, options)
+
+    assert row["summarized_at"] == migrate.NOT_SUMMARIZED
+    assert not (work / "transcript").exists()
+
+
+def test_a_wedged_encode_is_given_up_on_rather_than_waited_for() -> None:
+    """
+    An encode that stops reporting must not hold the stage open forever.
+
+    One did: ffmpeg spun on a core for six hours having read and written nothing
+    since its second minute, and the blocking read it was being watched through
+    meant the thread never came back and the run could not even be interrupted.
+
+    :return: None
+    """
+    read, write = os.pipe()
+    try:
+        os.write(write, b"out_time_us=1000000\n")
+        lines = migrate.encode_progress(os.fdopen(read, "rb"), stall_seconds=0.2)
+        assert next(lines) == "out_time_us=1000000"
+        with pytest.raises(TimeoutError):
+            next(lines)
+    finally:
+        os.close(write)
+
+
+def test_progress_arriving_in_pieces_is_still_read_as_lines() -> None:
+    """
+    A pipe hands over whatever has been written, which need not be whole lines.
+
+    :return: None
+    """
+    read, write = os.pipe()
+    try:
+        os.write(write, b"frame=1\nout_ti")
+        os.write(write, b"me_us=2000000\nprogress=continue\n")
+        os.close(write)
+        stream = os.fdopen(read, "rb")
+        assert list(migrate.encode_progress(stream, stall_seconds=5)) == [
+            "frame=1", "out_time_us=2000000", "progress=continue"]
+    finally:
+        stream.close()
+
+
+def test_an_encode_that_ignores_being_asked_is_ended_anyway() -> None:
+    """
+    ffmpeg catches SIGTERM and acts on it between iterations, so the wedged one
+    — the only kind worth killing — never sees it.
+
+    :return: None
+    """
+    process = subprocess.Popen(
+        [sys.executable, "-c",
+         "import signal, time\n"
+         "signal.signal(signal.SIGTERM, lambda *_ignored: None)\n"
+         "print('ready', flush=True)\n"
+         "time.sleep(60)\n"],
+        stdout=subprocess.PIPE, text=True)
+    assert process.stdout.readline().strip() == "ready"
+    migrate.end_encode(process, grace=1.0)
+    assert process.returncode == -signal.SIGKILL
+    process.stdout.close()

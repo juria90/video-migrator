@@ -38,6 +38,11 @@ site:
 upload:
   title_template: "{date} | {service} | {title} | {artist}"
   date_format: "{year}.{month}.{day}"
+  # The description, on the same empty-slot rule as the title: {summary} is
+  # empty until a summary has been written for the recording, and the blank
+  # line in front of it goes when it does. Slots: {summary} {title} {date}
+  # {service} {artist} {verse} {church}.
+  description_template: "{summary}\n\n본문: {verse}\n설교: {artist}\n예배: {date} {service}\n{church}"
 
 # One entry per board. Order sets the CLI --board choices, and the first entry
 # is the default. weekday is the day the service is held; a publish date one day
