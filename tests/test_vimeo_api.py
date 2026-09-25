@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
 """Tests for choosing which of a recording's download links to pull."""
 
+import pathlib
+
 import pytest
 
-from video_migrator.sources.vimeo_api import ENV_TOKEN, best_download, load_token, preferred_downloads
+from video_migrator.sources import vimeo_api
+from video_migrator.sources.vimeo_api import (
+    ENV_TOKEN,
+    best_download,
+    load_token,
+    preferred_downloads,
+)
 
 
 def test_a_video_offering_nothing_yields_nothing() -> None:
@@ -91,3 +99,34 @@ def test_preference_order_is_total_even_without_an_original() -> None:
     """Without a source entry the order is simply largest first."""
     downloads = [{"quality": "sd", "size": 40}, {"quality": "hd"}, {"quality": "hd", "size": 90}]
     assert [entry.get("size") for entry in preferred_downloads(downloads)] == [90, 40, None]
+
+
+def test_a_recording_vimeo_will_not_serve_fails_only_itself() -> None:
+    """
+    A fetch failure must be catchable, so the rest of the queue still runs.
+
+    SystemExit is not an Exception, so it went straight past the driver's
+    handler. The archive holds one recording Vimeo offers no download for, and
+    because the queue runs oldest first it was the first thing every run met:
+    the run ended there, having fetched nothing, with three hundred fetchable
+    recordings behind it.
+
+    :return: None
+    """
+    class Refusing(vimeo_api.VimeoAPI):
+        """An API whose recordings offer no download."""
+
+        def __init__(self):
+            """Deliberately no session: nothing here reaches the network."""
+
+        def video(self, video_id: str) -> dict:
+            """
+            :param video_id: Ignored
+            :return: A video resource offering nothing
+            """
+            return {"download": []}
+
+    with pytest.raises(Exception) as raised:
+        Refusing().download("45619691", pathlib.Path("unused.mp4"))
+    assert not isinstance(raised.value, SystemExit)
+    assert "offers no download" in str(raised.value)
