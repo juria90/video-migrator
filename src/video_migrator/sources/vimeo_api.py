@@ -210,19 +210,25 @@ class VimeoAPI:
         :param video_id: The numeric id, as the board records it
         :param destination: Where to write the file
         :return: The path written
-        :raises SystemExit: If the recording offers no download link, which
-            means either the account's plan or the token's scopes
+        :raises RuntimeError: If the recording offers no download link, or the
+            body that arrives is not the length that was promised. Raised
+            rather than exited: a caller carrying several hundred recordings
+            has to be able to record this one as failed and go on to the rest.
+            The archive holds one 2012 recording Vimeo will not serve, and
+            because the queue runs oldest first it was the first thing every
+            run met — ``SystemExit`` there ended the run before it had fetched
+            anything, three hundred fetchable recordings included.
         :raises requests.HTTPError: If the recording or the link is unreachable
         """
         offered = preferred_downloads(self.video(video_id).get("download") or [])
         if not offered:
-            raise SystemExit(
+            raise RuntimeError(
                 f"Vimeo offers no download for {video_id}. The token needs the 'video_files' scope, "
                 f"and the account's plan has to expose downloads at all."
             )
         chosen = next((entry for entry in offered if serves(entry["link"])), None)
         if chosen is None:
-            raise SystemExit(f"Vimeo lists {len(offered)} download(s) for {video_id} and serves none of them.")
+            raise RuntimeError(f"Vimeo lists {len(offered)} download(s) for {video_id} and serves none of them.")
         if chosen is not offered[0]:
             logger.info(f"  {video_id}: the original is listed but not served; taking the "
                   f"{chosen.get('width')}x{chosen.get('height')} {chosen.get('quality')} rendition instead")
@@ -263,7 +269,7 @@ class VimeoAPI:
         written = partial.stat().st_size
         if expected and written != expected:
             partial.unlink()
-            raise SystemExit(f"{video_id}: expected {expected} bytes, received {written}; leaving nothing behind")
+            raise RuntimeError(f"{video_id}: expected {expected} bytes, received {written}; leaving nothing behind")
         if already:
             logger.info(f"  {video_id}: resumed at {already / (1 << 20):.0f} MiB of {written / (1 << 20):.0f}")
 
